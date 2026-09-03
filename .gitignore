@@ -1,0 +1,26 @@
+# Environment & secrets
+.env
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Drafts and runtime data
+drafts/
+seen_stories.json
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
