@@ -144,6 +144,8 @@ def fetch_all_categories(limit_per_category: int = 2) -> list[Story]:
     for category in CATEGORIES:
         try:
             stories = fetch_news(limit=limit_per_category, category=category)
+            for s in stories:
+                s.category = category  # tag with category slug for image labelling
             all_stories.extend(stories)
         except NewsSourceError as exc:
             logger.warning("Could not fetch category '%s': %s", category, exc)

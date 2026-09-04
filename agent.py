@@ -33,6 +33,7 @@ from pipeline.deduplicator import check_duplicate, mark_seen
 from pipeline.generator import generate_post
 from pipeline.selector import select_story
 from pipeline.verifier import verify_story
+from pipeline.content_validator import ContentValidationError, validate_post
 
 # ---------------------------------------------------------------------------
 # Logging setup
@@ -50,7 +51,7 @@ logger = logging.getLogger(__name__)
 # Entry point
 # ---------------------------------------------------------------------------
 
-def main(dry_run: bool = False, publish: bool = False, count: int = 1, category: str = "breaking", all_categories: bool = False) -> int:
+def main(dry_run: bool = False, publish: bool = False, count: int = 1, category: str = "breaking", all_categories: bool = False, with_image: bool = False) -> int:
     """
     Run the news agent pipeline.
     Processes up to `count` stories per category in one run.
@@ -61,6 +62,8 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
         logger.info("DRY RUN mode: no files will be written.")
     if publish:
         logger.info("PUBLISH mode: approved drafts will be posted to Facebook.")
+    if with_image:
+        logger.info("IMAGE mode: posts will include a Pexels news image with headline overlay.")
 
     # ------------------------------------------------------------------
     # Step 1: Fetch news
@@ -98,6 +101,9 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
         except StoryRejected:
             continue
 
+        # Tag story with its category for image labelling
+        story.category = category if not all_categories else getattr(candidate, "category", "breaking")
+
         # Duplicate check
         try:
             check_duplicate(story)
@@ -128,6 +134,18 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
             failed_count += 1
             continue
 
+        # Validate generated content
+        try:
+            story = validate_post(story)
+        except ContentValidationError as exc:
+            logger.warning("Content validation failed: %s", exc)
+            story.draft_status = DraftStatus.REJECTED
+            story.rejection_reason = str(exc)
+            if not dry_run:
+                save_draft(story)
+            failed_count += 1
+            continue
+
         # Save draft
         if not dry_run:
             path = save_draft(story)
@@ -142,10 +160,21 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
 
             # Publish to Facebook
             if publish and story.draft_status.value == "READY_FOR_REVIEW":
-                from facebook.publisher import FacebookPublishError, publish_post
+                from facebook.publisher import FacebookPublishError, publish_post, publish_post_with_image
                 try:
-                    post_id = publish_post(story)
-                    logger.info("✓ Published to Facebook. Post ID: %s", post_id)
+                    if with_image:
+                        from image.maker import create_news_image
+                        image_path = create_news_image(story)
+                        if image_path:
+                            post_id = publish_post_with_image(story, image_path)
+                            logger.info("✓ Published to Facebook with image. Post ID: %s", post_id)
+                        else:
+                            logger.warning("Image creation failed — publishing text-only post instead.")
+                            post_id = publish_post(story)
+                            logger.info("✓ Published to Facebook (text only). Post ID: %s", post_id)
+                    else:
+                        post_id = publish_post(story)
+                        logger.info("✓ Published to Facebook. Post ID: %s", post_id)
                     published_count += 1
                     # Sleep between posts to avoid rate limiting
                     if published_count < target:
@@ -212,6 +241,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Fetch and publish from all 8 categories (uses --count per category).",
     )
+    parser.add_argument(
+        "--image",
+        action="store_true",
+        help="Step 2: Attach a relevant Pexels image with headline overlay to each post.",
+    )
     args = parser.parse_args()
     sys.exit(main(
         dry_run=args.dry_run,
@@ -219,4 +253,5 @@ if __name__ == "__main__":
         count=args.count,
         category=args.category,
         all_categories=args.all_categories,
+        with_image=args.image,
     ))

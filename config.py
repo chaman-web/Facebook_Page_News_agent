@@ -99,3 +99,9 @@ FACEBOOK_PAGE_ID: str = _optional("FACEBOOK_PAGE_ID", "")
 FACEBOOK_PAGE_TOKEN: str = _optional("FACEBOOK_PAGE_TOKEN", "")
 FACEBOOK_APP_ID: str = _optional("FACEBOOK_APP_ID", "")
 FACEBOOK_APP_SECRET: str = _optional("FACEBOOK_APP_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# Pexels image search (Step 2 — only needed when using --image)
+# ---------------------------------------------------------------------------
+
+PEXELS_API_KEY: str = _optional("PEXELS_API_KEY", "")

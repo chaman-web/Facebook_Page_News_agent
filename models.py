@@ -45,6 +45,7 @@ class Story:
     # --- Generation ---
     post_content: str | None = None
     hashtags: list[str] = field(default_factory=list)
+    category: str = "breaking"  # news category slug
 
     # --- Draft ---
     draft_status: DraftStatus = DraftStatus.DRAFT
