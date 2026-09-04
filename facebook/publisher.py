@@ -114,18 +114,45 @@ def publish_post(story: Story) -> str:
 
     logger.info("Publishing to Facebook Page %s ...", config.FACEBOOK_PAGE_ID)
 
-    try:
-        response = requests.post(url, json=payload, timeout=15)
-        response.raise_for_status()
-    except requests.RequestException as exc:
-        raise FacebookPublishError(f"Facebook API request failed: {exc}") from exc
+    last_error = None
+    response = None
+    for attempt in range(1, 3):  # Max 2 attempts
+        try:
+            response = requests.post(url, json=payload, timeout=15)
+            response.raise_for_status()
+            break  # Success — exit retry loop
+        except requests.RequestException as exc:
+            last_error = exc
+            # Try to extract Facebook's detailed error from response body
+            detail = ""
+            if response is not None:
+                try:
+                    err_data = response.json().get("error", {})
+                    code = err_data.get("code", "?")
+                    subcode = err_data.get("error_subcode", "")
+                    msg = err_data.get("message", "")
+                    err_type = err_data.get("type", "")
+                    detail = f" | FB Error {code}{f'/{subcode}' if subcode else ''} [{err_type}]: {msg}"
+                except Exception:
+                    detail = f" | Raw response: {response.text[:200]}"
+
+            if attempt < 2:
+                logger.warning("Publish attempt %d failed%s. Retrying once...", attempt, detail)
+            else:
+                raise FacebookPublishError(
+                    f"Publish failed after 2 attempts{detail}"
+                ) from last_error
 
     data = response.json()
 
     if "error" in data:
         err = data["error"]
+        code = err.get("code", "?")
+        subcode = err.get("error_subcode", "")
+        msg = err.get("message", "Unknown error")
+        err_type = err.get("type", "")
         raise FacebookPublishError(
-            f"Facebook API error {err.get('code')}: {err.get('message')}"
+            f"FB Error {code}{f'/{subcode}' if subcode else ''} [{err_type}]: {msg}"
         )
 
     post_id = data.get("id", "unknown")
