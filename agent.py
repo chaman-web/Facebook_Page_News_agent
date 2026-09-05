@@ -160,7 +160,7 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
 
             # Publish to Facebook
             if publish and story.draft_status.value == "READY_FOR_REVIEW":
-                from facebook.publisher import FacebookPublishError, publish_post, publish_post_with_image
+                from facebook.publisher import FacebookPublishError, FatalPublishError, publish_post, publish_post_with_image
                 try:
                     if with_image:
                         from image.maker import create_news_image
@@ -180,6 +180,11 @@ def main(dry_run: bool = False, publish: bool = False, count: int = 1, category:
                     if published_count < target:
                         logger.info("Sleeping 60 seconds before next post...")
                         time.sleep(60)
+                except FatalPublishError as exc:
+                    logger.error("\n%s", exc)
+                    logger.error("❌ Stopping all publishing. Please refresh your token and try again.")
+                    logger.info("=== Stopped early. %d/%d post(s) published before error. ===", published_count, target)
+                    return 1
                 except FacebookPublishError as exc:
                     logger.error("Facebook publish failed: %s", exc)
                     failed_count += 1

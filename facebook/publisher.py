@@ -32,6 +32,10 @@ GRAPH_API_URL = "https://graph.facebook.com/v19.0"
 class FacebookPublishError(Exception):
     """Raised when publishing to Facebook fails."""
 
+class FatalPublishError(Exception):
+    """Raised on unrecoverable errors (expired token, invalid token).
+    Agent must stop all further publishing immediately."""
+
 
 # ---------------------------------------------------------------------------
 # Text helpers
@@ -129,7 +133,10 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
     try:
         token = TokenManager().get_valid_token()
     except TokenExpiredError as exc:
-        raise FacebookPublishError(str(exc)) from exc
+        raise FatalPublishError(
+            f"🔴 ACCESS TOKEN EXPIRED — {exc}\n"
+            "Please get a fresh token from Facebook and update FACEBOOK_PAGE_TOKEN in .env"
+        ) from exc
 
     if image_path and image_path.exists():
         return _publish_with_photo(message, image_path, token)
@@ -168,6 +175,7 @@ def _publish_with_photo(message: str, image_path: Path, token: str) -> str:
         except requests.RequestException as exc:
             last_error = exc
             detail = _extract_fb_error(response)
+            _check_fatal_error(response)  # stops immediately on token errors
             if attempt < 2:
                 logger.warning("Image publish attempt %d failed%s. Retrying...", attempt, detail)
             else:
@@ -175,6 +183,7 @@ def _publish_with_photo(message: str, image_path: Path, token: str) -> str:
                     f"Image publish failed after 2 attempts{detail}"
                 ) from last_error
 
+    _check_fatal_error(response)  # final check on success response too
     data = response.json()
     if "error" in data:
         raise FacebookPublishError(_extract_fb_error(response))
@@ -196,6 +205,7 @@ def _post_with_retry(url: str, payload: dict) -> str:
         except requests.RequestException as exc:
             last_error = exc
             detail = _extract_fb_error(response)
+            _check_fatal_error(response)  # stops immediately on token errors
             if attempt < 2:
                 logger.warning("Publish attempt %d failed%s. Retrying once...", attempt, detail)
             else:
@@ -203,6 +213,7 @@ def _post_with_retry(url: str, payload: dict) -> str:
                     f"Publish failed after 2 attempts{detail}"
                 ) from last_error
 
+    _check_fatal_error(response)
     data = response.json()
     if "error" in data:
         raise FacebookPublishError(_extract_fb_error(response))
@@ -210,6 +221,27 @@ def _post_with_retry(url: str, payload: dict) -> str:
     post_id = data.get("id", "unknown")
     logger.info("✓ Published successfully. Facebook post ID: %s", post_id)
     return post_id
+
+
+def _check_fatal_error(response: Optional[requests.Response]) -> None:
+    """Raise FatalPublishError immediately if the response indicates a token/auth error."""
+    if response is None:
+        return
+    try:
+        err = response.json().get("error", {})
+        code = err.get("code")
+        msg  = err.get("message", "")
+        # Facebook auth error codes: 190 = invalid/expired token, 102 = session expired
+        if code in (190, 102, 2500):
+            raise FatalPublishError(
+                f"\n🔴 TOKEN ERROR — Facebook API Error {code}: {msg}\n"
+                "Your access token has expired or is invalid.\n"
+                "Please get a fresh token and update FACEBOOK_PAGE_TOKEN in .env"
+            )
+    except FatalPublishError:
+        raise
+    except Exception:
+        pass
 
 
 def _extract_fb_error(response: Optional[requests.Response]) -> str:

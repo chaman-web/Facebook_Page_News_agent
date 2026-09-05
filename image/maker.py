@@ -1,12 +1,8 @@
 """
 image/maker.py — Step 2: Professional Facebook news post image generator.
 
-Design spec: Global Pulse News brand
-- Canvas: 1200 × 1500 px (4:5 mobile-first)
-- Brand colors: Dark navy, Red, White
-- Typography: Montserrat ExtraBold (headline), Montserrat Bold (label/date)
-- Layout: Category label + headline top-left, photo dominant center,
-          brand name bottom-left, date bottom-right
+Design: Full-bleed photo with gradient overlays, editorial style.
+Canvas: 1200 × 1500 px (4:5 mobile-first)
 
 Fallback chain:
   Pexels (keyword) → Pexels (broad) → Pollinations.ai → None (text-only post)
@@ -15,8 +11,6 @@ Fallback chain:
 from __future__ import annotations
 
 import logging
-import os
-import textwrap
 from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
@@ -30,66 +24,56 @@ from models import Story
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Canvas
-# ---------------------------------------------------------------------------
-
+# ── Canvas ───────────────────────────────────────────────────────────────────
 IMAGE_WIDTH  = 1200
-IMAGE_HEIGHT = 1500   # 4:5 ratio — optimal for Facebook mobile feed
+IMAGE_HEIGHT = 1500
 
-# ---------------------------------------------------------------------------
-# Brand colors  (Dark navy / Red / White)
-# ---------------------------------------------------------------------------
+# ── Brand colors ─────────────────────────────────────────────────────────────
+NAVY         = (8,   16,  40)
+NAVY_LIGHT   = (18,  32,  72)
+RED          = (210, 30,  45)
+RED_DARK     = (140, 18,  28)
+WHITE        = (255, 255, 255)
+OFF_WHITE    = (220, 225, 235)
+GOLD         = (255, 200, 60)   # accent for divider lines
 
-NAVY        = (10,  20,  50)       # Dark navy background / overlays
-RED         = (210, 30,  45)       # Accent red for category label
-WHITE       = (255, 255, 255)
-OFF_WHITE   = (240, 240, 240)      # Subtle secondary text
-SHADOW      = (0,   0,   0,  180)  # Text drop shadow (RGBA)
+# ── Layout zones (px from top) ────────────────────────────────────────────────
+#   0        → PHOTO_BOT  : full-bleed photo
+#   0        → 380        : top dark gradient overlay  (headline sits here)
+#   PHOTO_BOT→ IMAGE_HEIGHT: solid dark panel (context + branding)
+PHOTO_BOT    = 1170   # photo ends, dark panel begins
 
-# ---------------------------------------------------------------------------
-# Layout margins & sizes
-# ---------------------------------------------------------------------------
+# ── Typography ───────────────────────────────────────────────────────────────
+LABEL_SIZE      = 28
+HEADLINE_SIZE   = 80
+HEADLINE_MIN    = 58
+CONTEXT_SIZE    = 32
+DATE_SIZE       = 24
+SOURCE_SIZE     = 22
 
-MARGIN_LEFT   = 80
-MARGIN_TOP    = 70
-MARGIN_RIGHT  = 80
-MARGIN_BOTTOM = 75
+# ── Margins ──────────────────────────────────────────────────────────────────
+ML = 72    # margin left
+MR = 72    # margin right
+MT = 60    # margin top
 
-LABEL_FONT_SIZE    = 30
-HEADLINE_FONT_SIZE = 76   # Reduced if headline is long
-HEADLINE_MIN_SIZE  = 58
-DATE_FONT_SIZE     = 26
-BRAND_FONT_SIZE    = 28
-
-LABEL_PAD_X = 22   # Horizontal padding inside the red label box
-LABEL_PAD_Y = 10   # Vertical padding inside the red label box
-
-# ---------------------------------------------------------------------------
-# Fonts
-# ---------------------------------------------------------------------------
-
+# ── Font dir ─────────────────────────────────────────────────────────────────
 _FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
 
 def _font(name: str, size: int) -> ImageFont.FreeTypeFont:
-    """Load a Montserrat variant; fall back to Ubuntu Bold then PIL default."""
     candidates = [
         _FONT_DIR / name,
         Path("/usr/share/fonts/truetype/ubuntu/Ubuntu-B.ttf"),
         Path("/usr/share/fonts/truetype/freefont/FreeSansBold.ttf"),
     ]
-    for path in candidates:
-        if path.exists():
+    for p in candidates:
+        if p.exists():
             try:
-                return ImageFont.truetype(str(path), size)
+                return ImageFont.truetype(str(p), size)
             except Exception:
                 continue
     return ImageFont.load_default()
 
-# ---------------------------------------------------------------------------
-# Category → label text mapping
-# ---------------------------------------------------------------------------
-
+# ── Category labels ───────────────────────────────────────────────────────────
 CATEGORY_LABELS = {
     "breaking":      "BREAKING NEWS",
     "technology":    "TECHNOLOGY",
@@ -99,31 +83,46 @@ CATEGORY_LABELS = {
     "sports":        "SPORTS",
     "trending":      "TRENDING",
     "entertainment": "ENTERTAINMENT",
+    "jobs":          "JOBS & OPPORTUNITIES",
+    "world":         "WORLD NEWS",
+    "crime":         "CRIME & JUSTICE",
+    "climate":       "CLIMATE & ENVIRONMENT",
+    "war":           "WAR & CONFLICT",
+    "wellness":      "HEALTH & WELLNESS",
+}
+
+# ── Category accent colors ────────────────────────────────────────────────────
+CATEGORY_COLORS = {
+    "breaking":      (210, 30,  45),   # red
+    "technology":    (0,   140, 255),  # blue
+    "business":      (0,   180, 120),  # green
+    "politics":      (180, 60,  200),  # purple
+    "science":       (0,   190, 200),  # teal
+    "sports":        (255, 140, 0),    # orange
+    "trending":      (255, 60,  130),  # pink
+    "entertainment": (255, 200, 0),    # gold
+    "jobs":          (50,  200, 100),  # emerald green
+    "world":         (30,  100, 220),  # royal blue
+    "crime":         (180, 30,  30),   # dark red
+    "climate":       (30,  180, 80),   # forest green
+    "war":           (200, 80,  0),    # burnt orange
+    "wellness":      (0,   200, 180),  # mint
 }
 
 
-# ---------------------------------------------------------------------------
-# Public interface
-# ---------------------------------------------------------------------------
+# ── Public interface ──────────────────────────────────────────────────────────
 
 def create_news_image(story: Story) -> Optional[Path]:
-    """
-    Build a professional news post image for the given story.
-    Returns local path to saved JPEG, or None on failure.
-    """
     IMAGES_DIR = Path("images")
     IMAGES_DIR.mkdir(exist_ok=True)
 
-    # 1. Fetch photo
     photo = _fetch_photo(story)
     if photo is None:
         logger.error("All image sources failed for: %s", story.title)
         return None
 
-    # 2. Compose the full graphic
     image = _compose(photo, story)
 
-    # 3. Save
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
     out_path = IMAGES_DIR / f"{safe}.jpg"
     image.save(out_path, "JPEG", quality=93, optimize=True)
@@ -131,23 +130,19 @@ def create_news_image(story: Story) -> Optional[Path]:
     return out_path
 
 
-# ---------------------------------------------------------------------------
-# Photo fetching
-# ---------------------------------------------------------------------------
+# ── Photo fetching ────────────────────────────────────────────────────────────
 
 def _fetch_photo(story: Story) -> Optional[Image.Image]:
-    """Pexels → Pexels broad → Pollinations fallback."""
     if config.PEXELS_API_KEY:
-        keywords = _keywords(story.title)
-        photo = _pexels(keywords)
+        kw = _keywords(story.title)
+        photo = _pexels(kw)
         if photo is None:
             broad = _keywords(story.title, broad=True)
-            logger.warning("Pexels: no result for '%s', trying '%s'", keywords, broad)
+            logger.warning("Pexels: no result for '%s', trying '%s'", kw, broad)
             photo = _pexels(broad)
         if photo:
             return photo
         logger.warning("Pexels unavailable — trying Pollinations.ai")
-
     return _pollinations(story.title)
 
 
@@ -164,8 +159,7 @@ def _pexels(query: str) -> Optional[Image.Image]:
         if not photos:
             return None
         url = photos[0]["src"]["large2x"]
-        photographer = photos[0].get("photographer", "")
-        logger.info("Pexels image by %s", photographer)
+        logger.info("Pexels image by %s", photos[0].get("photographer", ""))
         return _download(url)
     except Exception as exc:
         logger.warning("Pexels error: %s", exc)
@@ -198,233 +192,318 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Composition
-# ---------------------------------------------------------------------------
+# ── Composition ───────────────────────────────────────────────────────────────
 
 def _compose(photo: Image.Image, story: Story) -> Image.Image:
-    """
-    Assemble the full 1200×1500 canvas following the exact layout spec:
+    category = (getattr(story, "category", "breaking") or "breaking").lower()
+    accent   = CATEGORY_COLORS.get(category, RED)
+    label    = CATEGORY_LABELS.get(category, "WORLD NEWS")
 
-    0–90 px       Dark navy top bar — category label
-    90–280 px     MAIN HEADLINE (2–3 lines, white ExtraBold)
-    280–1230 px   NEWS PHOTO (dominant, full width)
-    1230–1350 px  Dark navy — optional short context line
-    1350–1500 px  Dark navy bottom bar — logo left, date right
-    """
-    canvas = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), NAVY)
-    draw = ImageDraw.Draw(canvas)
+    # ── 1. Full-bleed photo as base ───────────────────────────────────────────
+    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).copy()
+    draw   = ImageDraw.Draw(canvas, "RGBA")
 
-    # ── Zone boundaries ──────────────────────────────────────────────────────
-    TOP_BAR_H      = 90      # category label zone
-    HEADLINE_TOP   = 100     # headline starts here
-    HEADLINE_BOT   = 285     # headline ends here
-    PHOTO_TOP      = 285     # photo starts immediately after headline
-    PHOTO_BOT      = 1235    # photo ends here  (~65% of canvas)
-    CONTEXT_TOP    = 1235    # optional context line
-    CONTEXT_BOT    = 1360
-    BOTTOM_TOP     = 1360    # logo + date bar
-    # ────────────────────────────────────────────────────────────────────────
+    # ── 2. Top gradient overlay (dark navy → transparent, top 38%) ────────────
+    _gradient_rect(draw, 0, 0, IMAGE_WIDTH, int(IMAGE_HEIGHT * 0.42),
+                   top_color=(*NAVY, 230), bottom_color=(*NAVY, 0))
 
-    # --- Top bar background (slightly lighter navy for contrast) ---
-    draw.rectangle([(0, 0), (IMAGE_WIDTH, TOP_BAR_H)], fill=(15, 28, 65))
+    # ── 3. Bottom gradient overlay (transparent → dark navy, bottom 42%) ──────
+    fade_start = int(IMAGE_HEIGHT * 0.58)
+    _gradient_rect(draw, 0, fade_start, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 255))
 
-    # --- Photo zone ---
-    photo_h = PHOTO_BOT - PHOTO_TOP
-    photo_resized = _smart_crop(photo, IMAGE_WIDTH, photo_h)
-    canvas.paste(photo_resized, (0, PHOTO_TOP))
+    # ── 4. Heavy bottom gradient (no solid panel — photo bleeds to edge) ────────
+    # Already handled by the bottom gradient drawn in step 3 above
+    # Just ensure bottom 200px is very dark for footer readability
+    _gradient_rect(draw, 0, IMAGE_HEIGHT - 280, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 210))
 
-    # --- Thin red accent line between headline zone and photo ---
-    draw.rectangle([(0, PHOTO_TOP - 4), (IMAGE_WIDTH, PHOTO_TOP)], fill=RED)
+    # ── 5. Accent color top border line ───────────────────────────────────────
+    draw.rectangle([(0, 0), (IMAGE_WIDTH, 6)], fill=(*accent, 255))
 
-    # --- Context + bottom zones (solid navy) ---
-    draw.rectangle([(0, PHOTO_BOT), (IMAGE_WIDTH, IMAGE_HEIGHT)], fill=NAVY)
+    # ── 6. Thin accent line at bottom edge ────────────────────────────────────
+    draw.rectangle([(0, IMAGE_HEIGHT - 6), (IMAGE_WIDTH, IMAGE_HEIGHT)],
+                   fill=(*accent, 255))
 
-    # --- Thin red accent line above context zone ---
-    draw.rectangle([(0, PHOTO_BOT), (IMAGE_WIDTH, PHOTO_BOT + 4)], fill=RED)
+    # ── 7. Left accent bar (vertical stripe, full height of top area) ─────────
+    draw.rectangle([(0, 0), (6, PHOTO_BOT)], fill=(*accent, 140))
 
-    # ── Category label (top-left in top bar) ─────────────────────────────────
-    category = getattr(story, "category", "breaking") or "breaking"
-    label_text = CATEGORY_LABELS.get(category.lower(), "WORLD NEWS")
-    label_font = _font("Montserrat-Bold.ttf", LABEL_FONT_SIZE)
-    text_w = draw.textlength(label_text, font=label_font)
+    # Commit RGBA draws, switch to RGB draw for text
+    canvas = canvas.convert("RGB")
+    draw   = ImageDraw.Draw(canvas)
 
-    lx1 = MARGIN_LEFT
-    ly1 = 18
-    lx2 = int(lx1 + text_w + LABEL_PAD_X * 2)
-    ly2 = int(ly1 + LABEL_FONT_SIZE + LABEL_PAD_Y * 2)
-    draw.rectangle([(lx1, ly1), (lx2, ly2)], fill=RED)
-    draw.text((lx1 + LABEL_PAD_X, ly1 + LABEL_PAD_Y), label_text, font=label_font, fill=WHITE)
+    # ── 8. Category label badge ───────────────────────────────────────────────
+    lbl_font = _font("Montserrat-Bold.ttf", LABEL_SIZE)
+    lbl_w    = int(draw.textlength(label, font=lbl_font))
+    lbl_px, lbl_py = 20, 9
 
-    # ── Main headline (top-left, below category bar) ──────────────────────────
-    headline = _short_headline(story.title)
-    max_width = IMAGE_WIDTH - MARGIN_LEFT - MARGIN_RIGHT
-    available_h = HEADLINE_BOT - HEADLINE_TOP - 20
+    bx1 = ML
+    by1 = MT
+    bx2 = bx1 + lbl_w + lbl_px * 2
+    by2 = by1 + LABEL_SIZE + lbl_py * 2
 
-    font_size = HEADLINE_FONT_SIZE
-    font = _font("Montserrat-ExtraBold.ttf", font_size)
-    wrapped = _wrap_text(draw, headline, font, max_width)
-    lines = wrapped.splitlines()
+    # Badge fill
+    draw.rectangle([(bx1, by1), (bx2, by2)], fill=accent)
+    # Left bold accent stripe on badge
+    draw.rectangle([(bx1, by1), (bx1 + 6, by2)], fill=WHITE)
+    # Label text
+    draw.text((bx1 + lbl_px + 8, by1 + lbl_py), label, font=lbl_font, fill=WHITE)
 
-    # Reduce font size until it fits in 3 lines within the headline zone
-    while (len(lines) > 3 or len(lines) * int(font_size * 1.18) > available_h) and font_size > HEADLINE_MIN_SIZE:
-        font_size -= 4
-        font = _font("Montserrat-ExtraBold.ttf", font_size)
-        wrapped = _wrap_text(draw, headline, font, max_width)
-        lines = wrapped.splitlines()
+    label_bottom = by2
 
-    line_height = int(font_size * 1.18)
-    y = HEADLINE_TOP
+    # ── 9. Main headline ──────────────────────────────────────────────────────
+    headline  = _short_headline(story.title)
+    max_w     = IMAGE_WIDTH - ML - MR
+    hl_size   = HEADLINE_SIZE
+    hl_font   = _font("Montserrat-ExtraBold.ttf", hl_size)
+    wrapped   = _wrap_text(draw, headline, hl_font, max_w)
+    lines     = wrapped.splitlines()
+
+    while (len(lines) > 3 or len(lines) * int(hl_size * 1.2) > 290) and hl_size > HEADLINE_MIN:
+        hl_size -= 4
+        hl_font  = _font("Montserrat-ExtraBold.ttf", hl_size)
+        wrapped  = _wrap_text(draw, headline, hl_font, max_w)
+        lines    = wrapped.splitlines()
+
+    line_h = int(hl_size * 1.2)
+    hl_y   = label_bottom + 22
 
     for line in lines[:3]:
-        # Shadow
-        draw.text((MARGIN_LEFT + 2, y + 2), line, font=font, fill=(0, 0, 0, 160))
-        # White text
-        draw.text((MARGIN_LEFT, y), line, font=font, fill=WHITE)
-        y += line_height
+        # Multi-layer shadow for depth
+        for ox, oy in [(3, 3), (2, 2), (1, 1)]:
+            draw.text((ML + ox, hl_y + oy), line, font=hl_font, fill=(0, 0, 0))
+        draw.text((ML, hl_y), line, font=hl_font, fill=WHITE)
+        hl_y += line_h
 
-    # ── Optional context line (1235–1360 px zone) ─────────────────────────────
+    # ── 10. Thin gold rule under headline ─────────────────────────────────────
+    rule_y = hl_y + 12
+    draw.rectangle([(ML, rule_y), (ML + 120, rule_y + 3)], fill=accent)
+
+    # ── 11. Context line — sits inside bottom of photo, above footer ─────────
+    # Position: 280px above bottom edge, left-aligned with a accent bar
     context = _context_line(story)
+    CONTEXT_Y = IMAGE_HEIGHT - 280   # above footer row (footer mid = HEIGHT - 95)
+
     if context:
-        ctx_font = _font("Montserrat-Medium.ttf", 34)
-        ctx_y = CONTEXT_TOP + (CONTEXT_BOT - CONTEXT_TOP - 34) // 2
-        draw.text((MARGIN_LEFT, ctx_y), context, font=ctx_font, fill=OFF_WHITE)
+        ctx_font = _font("Montserrat-SemiBold.ttf", CONTEXT_SIZE)
+        while draw.textlength(context, font=ctx_font) > max_w and len(context) > 10:
+            context = context[:context.rfind(" ")] + "..."
 
-    # ── Bottom bar: logo left, date right (1360–1500 px) ─────────────────────
-    bottom_bar_h = IMAGE_HEIGHT - BOTTOM_TOP   # 140 px
-    logo_h = bottom_bar_h - 30                 # 110 px tall, 15 px padding top/bottom
-    logo_w = logo_h                            # square logo
+        ctx_h = CONTEXT_SIZE
+        # Thin accent bar to the left of the context line
+        draw.rectangle(
+            [(ML, CONTEXT_Y), (ML + 4, CONTEXT_Y + ctx_h)],
+            fill=accent,
+        )
+        # Context text indented after bar
+        draw.text((ML + 16, CONTEXT_Y), context, font=ctx_font, fill=OFF_WHITE)
 
+        # Thin full-width separator line below context, above footer
+        sep_y = CONTEXT_Y + ctx_h + 18
+        draw.rectangle([(ML, sep_y), (IMAGE_WIDTH - MR, sep_y + 1)],
+                       fill=(255, 255, 255, 40))
+
+    # ── 12. Footer — NO background, elements float over the gradient ──────────
+    # Layout: Logo | vertical divider | source pill  ···  date + wordmark
+    # All sitting in the bottom 200px of the canvas
+
+    FOOTER_MID = IMAGE_HEIGHT - 95   # vertical center of footer row
+
+    # ── Logo ─────────────────────────────────────────────────────────────────
     logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
-    if logo_path.exists():
-        logo = Image.open(logo_path).convert("RGBA")
-        logo = logo.resize((logo_w, logo_h), Image.LANCZOS)
-        logo_y = BOTTOM_TOP + (bottom_bar_h - logo_h) // 2
-        if logo.mode == "RGBA":
-            canvas.paste(logo, (MARGIN_LEFT, logo_y), logo.split()[3])
-        else:
-            canvas.paste(logo.convert("RGB"), (MARGIN_LEFT, logo_y))
-    else:
-        # Fallback: text if logo file missing
-        brand_font = _font("Montserrat-Bold.ttf", BRAND_FONT_SIZE)
-        brand_y = BOTTOM_TOP + (bottom_bar_h - BRAND_FONT_SIZE) // 2
-        draw.text((MARGIN_LEFT, brand_y), "WORLD ", font=brand_font, fill=WHITE)
-        world_w = int(draw.textlength("WORLD ", font=brand_font))
-        draw.text((MARGIN_LEFT + world_w, brand_y), "UPDATE", font=brand_font, fill=RED)
+    LOGO_H    = 110
+    LOGO_W    = 110
+    logo_right = ML
 
-    # Source badge — centered between logo and date
+    if logo_path.exists():
+        logo   = Image.open(logo_path).convert("RGBA")
+        logo   = logo.resize((LOGO_W, LOGO_H), Image.LANCZOS)
+        logo_y = FOOTER_MID - LOGO_H // 2
+        canvas.paste(logo, (ML, logo_y), logo.split()[3])
+        logo_right = ML + LOGO_W
+
+    # ── Glowing vertical divider ──────────────────────────────────────────────
+    div_x  = logo_right + 20
+    div_y1 = FOOTER_MID - 40
+    div_y2 = FOOTER_MID + 40
+    # Soft glow: draw 3px wide with decreasing opacity
+    for offset, alpha in [(2, 40), (1, 90), (0, 200)]:
+        c = tuple([*accent[:3], alpha])
+        draw.rectangle(
+            [(div_x - offset, div_y1), (div_x + offset, div_y2)],
+            fill=(*accent[:3], alpha)
+        )
+
+    # ── Source section ────────────────────────────────────────────────────────
     sources = [story.source_name]
     if story.corroborating_sources:
         extra = story.corroborating_sources[0].get("name", "")
         if extra and extra != story.source_name:
             sources.append(extra)
-    source_text = "  •  ".join(sources[:2])
-    src_font = _font("Montserrat-Bold.ttf", DATE_FONT_SIZE - 2)
-    src_w = int(draw.textlength(source_text, font=src_font))
-    src_h = DATE_FONT_SIZE - 2
 
-    badge_pad_x = 18
-    badge_pad_y = 8
-    badge_w = src_w + badge_pad_x * 2
-    badge_h = src_h + badge_pad_y * 2
-    badge_x = (IMAGE_WIDTH - badge_w) // 2
-    badge_y = BOTTOM_TOP + (bottom_bar_h - badge_h) // 2
+    src_x     = div_x + 24
+    pri_font  = _font("Montserrat-ExtraBold.ttf", SOURCE_SIZE + 6)  # primary source — big
+    sec_font  = _font("Montserrat-Medium.ttf",    SOURCE_SIZE)       # secondary — smaller
+    line_gap  = 10
+    pri_h     = SOURCE_SIZE + 6
+    sec_h     = SOURCE_SIZE
+    total_h   = pri_h + (line_gap + sec_h if len(sources) > 1 else 0)
+    sy        = FOOTER_MID - total_h // 2
 
-    # Dark red badge background with rounded feel (rectangle)
+    # ── Primary source ────────────────────────────────────────────────────────
+    pri_name = sources[0].upper()
+    pri_w    = int(draw.textlength(pri_name, font=pri_font))
+
+    # Accent dot
+    dot_r  = 6
+    dot_cx = src_x + dot_r
+    dot_cy = sy + pri_h // 2
+    draw.ellipse([(dot_cx - dot_r, dot_cy - dot_r),
+                  (dot_cx + dot_r, dot_cy + dot_r)], fill=accent)
+
+    # Primary name — white, extrabold
+    draw.text((src_x + dot_r * 2 + 14, sy), pri_name, font=pri_font, fill=WHITE)
+
+    # Thin accent underline under primary name
+    ul_x = src_x + dot_r * 2 + 14
     draw.rectangle(
-        [(badge_x, badge_y), (badge_x + badge_w, badge_y + badge_h)],
-        fill=(140, 20, 30),   # dark red
-        outline=RED,
-        width=2,
-    )
-    # White source text inside badge
-    draw.text(
-        (badge_x + badge_pad_x, badge_y + badge_pad_y),
-        source_text, font=src_font, fill=WHITE,
+        [(ul_x, sy + pri_h + 2), (ul_x + pri_w, sy + pri_h + 4)],
+        fill=accent,
     )
 
-    # Date bottom-right
-    date_str = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
-    date_font = _font("Montserrat-Medium.ttf", DATE_FONT_SIZE)
-    date_w = int(draw.textlength(date_str, font=date_font))
-    date_x = IMAGE_WIDTH - MARGIN_RIGHT - date_w
-    date_y = BOTTOM_TOP + (bottom_bar_h - DATE_FONT_SIZE) // 2
-    draw.text((date_x, date_y), date_str, font=date_font, fill=OFF_WHITE)
+    # ── Secondary source ──────────────────────────────────────────────────────
+    if len(sources) > 1:
+        sy2      = sy + pri_h + line_gap + 4
+        sec_name = sources[1].upper()
+
+        # Smaller hollow dot
+        dot_r2  = 4
+        dot_cx2 = src_x + dot_r2
+        dot_cy2 = sy2 + sec_h // 2
+        draw.ellipse([(dot_cx2 - dot_r2, dot_cy2 - dot_r2),
+                      (dot_cx2 + dot_r2, dot_cy2 + dot_r2)],
+                     outline=accent, width=2)
+
+        draw.text((src_x + dot_r2 * 2 + 14, sy2), sec_name,
+                  font=sec_font, fill=OFF_WHITE)
+
+        sy += line_h
+
+    # ── Date (right side, clean — no wordmark) ────────────────────────────────
+    date_str  = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
+    date_font = _font("Montserrat-ExtraBold.ttf", DATE_SIZE + 6)
+    date_w    = int(draw.textlength(date_str, font=date_font))
+    date_x    = IMAGE_WIDTH - MR - date_w
+    date_y    = FOOTER_MID - (DATE_SIZE + 6) // 2
+
+    # Subtle accent glow behind date
+    for gx, gy, ga in [(-1,-1,50),(1,-1,50),(-1,1,50),(1,1,50)]:
+        draw.text((date_x + gx, date_y + gy), date_str, font=date_font,
+                  fill=(*accent[:3], ga))
+    draw.text((date_x, date_y), date_str, font=date_font, fill=WHITE)
+
+    # Accent underline below date
+    draw.rectangle(
+        [(date_x, date_y + DATE_SIZE + 9), (date_x + date_w, date_y + DATE_SIZE + 12)],
+        fill=accent,
+    )
 
     return canvas
 
 
+# ── Drawing helpers ───────────────────────────────────────────────────────────
+
+def _draw_rounded_rect(draw, x1, y1, x2, y2, radius, fill):
+    """Fill a rounded rectangle (RGBA fill tuple)."""
+    r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
+    draw.rectangle([(x1 + r, y1), (x2 - r, y2)], fill=fill)
+    draw.rectangle([(x1, y1 + r), (x2, y2 - r)], fill=fill)
+    draw.ellipse([(x1, y1), (x1 + r*2, y1 + r*2)], fill=fill)
+    draw.ellipse([(x2 - r*2, y1), (x2, y1 + r*2)], fill=fill)
+    draw.ellipse([(x1, y2 - r*2), (x1 + r*2, y2)], fill=fill)
+    draw.ellipse([(x2 - r*2, y2 - r*2), (x2, y2)], fill=fill)
+
+
+def _draw_rounded_rect_outline(draw, x1, y1, x2, y2, radius, outline, width=2):
+    """Draw rounded rectangle outline only."""
+    r = min(radius, (x2 - x1) // 2, (y2 - y1) // 2)
+    draw.arc([(x1, y1), (x1 + r*2, y1 + r*2)], 180, 270, fill=outline, width=width)
+    draw.arc([(x2 - r*2, y1), (x2, y1 + r*2)], 270, 360, fill=outline, width=width)
+    draw.arc([(x1, y2 - r*2), (x1 + r*2, y2)], 90, 180, fill=outline, width=width)
+    draw.arc([(x2 - r*2, y2 - r*2), (x2, y2)], 0, 90, fill=outline, width=width)
+    draw.line([(x1 + r, y1), (x2 - r, y1)], fill=outline, width=width)
+    draw.line([(x1 + r, y2), (x2 - r, y2)], fill=outline, width=width)
+    draw.line([(x1, y1 + r), (x1, y2 - r)], fill=outline, width=width)
+    draw.line([(x2, y1 + r), (x2, y2 - r)], fill=outline, width=width)
+
+
+def _gradient_rect(
+    draw: ImageDraw.Draw,
+    x1: int, y1: int, x2: int, y2: int,
+    top_color: tuple, bottom_color: tuple,
+) -> None:
+    """Draw a vertical linear gradient rectangle (RGBA draw context required)."""
+    h = y2 - y1
+    if h <= 0:
+        return
+    tr, tg, tb, ta = top_color
+    br, bg, bb, ba = bottom_color
+    for i in range(h):
+        t = i / h
+        r = int(tr + (br - tr) * t)
+        g = int(tg + (bg - tg) * t)
+        b = int(tb + (bb - tb) * t)
+        a = int(ta + (ba - ta) * t)
+        draw.line([(x1, y1 + i), (x2, y1 + i)], fill=(r, g, b, a))
+
+
 def _context_line(story: Story) -> str:
-    """Extract a short 3–7 word context line from the story summary."""
     summary = story.raw_summary or ""
     if not summary:
         return ""
-    words = summary.split()
+    first = summary.split(".")[0].strip()
+    words = first.split()
     if len(words) < 4:
         return ""
-    # Take first sentence, cap at 7 words
-    first_sentence = summary.split(".")[0].strip()
-    words = first_sentence.split()
-    if len(words) > 7:
-        return " ".join(words[:7]) + "..."
-    return first_sentence
+    return " ".join(words[:12]) + ("..." if len(words) > 12 else "")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _smart_crop(img: Image.Image, target_w: int, target_h: int) -> Image.Image:
-    """Resize and center-crop image to exact target dimensions."""
-    src_w, src_h = img.size
-    scale = max(target_w / src_w, target_h / src_h)
-    new_w = int(src_w * scale)
-    new_h = int(src_h * scale)
-    img = img.resize((new_w, new_h), Image.LANCZOS)
-    left = (new_w - target_w) // 2
-    top  = (new_h - target_h) // 2
-    return img.crop((left, top, left + target_w, top + target_h))
+def _smart_crop(img: Image.Image, tw: int, th: int) -> Image.Image:
+    w, h   = img.size
+    scale  = max(tw / w, th / h)
+    nw, nh = int(w * scale), int(h * scale)
+    img    = img.resize((nw, nh), Image.LANCZOS)
+    left   = (nw - tw) // 2
+    top    = (nh - th) // 2
+    return img.crop((left, top, left + tw, top + th))
 
 
-def _wrap_text(draw: ImageDraw.Draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
-    """Wrap text to fit within max_width pixels."""
-    words = text.split()
-    lines = []
-    current = ""
+def _wrap_text(draw: ImageDraw.Draw, text: str, font: ImageFont.FreeTypeFont, max_w: int) -> str:
+    words, lines, cur = text.split(), [], ""
     for word in words:
-        test = f"{current} {word}".strip()
-        if draw.textlength(test, font=font) <= max_width:
-            current = test
+        test = f"{cur} {word}".strip()
+        if draw.textlength(test, font=font) <= max_w:
+            cur = test
         else:
-            if current:
-                lines.append(current)
-            current = word
-    if current:
-        lines.append(current)
+            if cur:
+                lines.append(cur)
+            cur = word
+    if cur:
+        lines.append(cur)
     return "\n".join(lines)
 
 
 def _short_headline(title: str) -> str:
-    """
-    Rewrite the title into a short, punchy 6–12 word headline.
-    Removes source attribution (e.g. '- BBC News', '| Reuters').
-    """
-    # Strip source attribution appended by NewsAPI
     for sep in [" - ", " | ", " — ", " – "]:
         if sep in title:
             title = title[:title.rfind(sep)].strip()
-
     words = title.split()
     if len(words) <= 12:
         return title.upper()
-
-    # Truncate to 10 words at a natural break
-    short = " ".join(words[:10])
-    return short.upper() + "..."
+    return " ".join(words[:10]).upper() + "..."
 
 
 def _keywords(title: str, broad: bool = False) -> str:
-    """Extract 2–3 search keywords from title."""
     stop = {
         "the","a","an","and","or","but","in","on","at","to","for","of","with",
         "by","from","as","is","was","are","were","be","been","its","this","that",
