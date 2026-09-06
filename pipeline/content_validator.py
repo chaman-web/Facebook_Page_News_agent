@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MIN_CHARS = 200          # Minimum post body length
-MAX_CHARS = 3000         # Facebook post limit is ~63,000 but we keep it readable
-MIN_HASHTAGS = 3         # At least 3 hashtags required
+MAX_CHARS = 2500         # Keep posts concise — Facebook best practice
+MIN_HASHTAGS = 2         # At least 2 hashtags required
+MAX_HASHTAGS = 5         # Cap at 5 — quality over quantity
 MAX_REPEATED_SENTENCES = 2  # Flag if same sentence appears more than this
 
 # Placeholder patterns the LLM sometimes outputs
@@ -108,11 +109,18 @@ def validate_post(story: Story) -> Story:
             "First line should be a meaningful headline."
         )
 
-    # 4. Minimum hashtags
+    # 4. Hashtag count — enforce 2–5
     if len(hashtags) < MIN_HASHTAGS:
         issues.append(
             f"Too few hashtags ({len(hashtags)}, minimum {MIN_HASHTAGS})."
         )
+    if len(hashtags) > MAX_HASHTAGS:
+        # Silently trim to MAX_HASHTAGS — always keep #WorldUpdate first
+        priority = [t for t in hashtags if t.lower() == "#worldupdate"]
+        rest     = [t for t in hashtags if t.lower() != "#worldupdate"]
+        story.hashtags = (priority + rest)[:MAX_HASHTAGS]
+        hashtags = story.hashtags
+        logger.info("Trimmed hashtags to %d: %s", MAX_HASHTAGS, ", ".join(hashtags))
 
     # 5. Placeholder text detection
     post_lower = post.lower()
@@ -148,6 +156,17 @@ def validate_post(story: Story) -> Story:
                     f"Post contains excessive repetition of: '{sentence[:60]}...'"
                 )
                 break
+
+    # 9. Must contain closing question (engagement driver)
+    has_question = "?" in post or "👇" in post
+    if not has_question:
+        logger.warning("Post has no closing question — engagement may be lower.")
+
+    # 10. Must contain page hashtag
+    page_tags = ["#globalpulsenews", "#worldupdate"]
+    has_page_tag = any(t in post_lower for t in page_tags)
+    if not has_page_tag:
+        logger.warning("Post is missing the page hashtag (#GlobalPulseNews).")
 
     # --- Report results ---
     if issues:

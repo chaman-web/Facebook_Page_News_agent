@@ -1,0 +1,98 @@
+[
+  {
+    "title": "The Gaslighting of Hannah Pettey",
+    "source_name": "Home - CBSNews.com",
+    "source_url": "https://www.cbsnews.com/video/the-gaslighting-of-hannah-pettey-1/",
+    "category": "breaking",
+    "score": 180.6,
+    "queued_at": "2026-09-06T05:51:23.975186+00:00",
+    "is_breaking": true,
+    "category_tier": 2,
+    "published_at": "2026-09-06T05:54:19.625808+00:00",
+    "status": "PUBLISHED"
+  },
+  {
+    "title": "Drone attack blamed on guerrillas kills at least three soldiers in Colombia",
+    "source_name": "World news | The Guardian",
+    "source_url": "https://www.theguardian.com/world/2026/sep/05/drone-attack-guerrillas-kills-soldiers-colombia",
+    "category": "breaking",
+    "score": 75.3,
+    "queued_at": "2026-09-06T05:51:23.979879+00:00",
+    "is_breaking": true,
+    "category_tier": 2,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "‘It cost me many friendships’: former Brazil military chief reveals inside struggle to stop Bolsonaro’s coup",
+    "source_name": "World news | The Guardian",
+    "source_url": "https://www.theguardian.com/world/2026/sep/05/jair-bolsonaro-coup-plan-2022-election-brazil-air-force-baptista-junior",
+    "category": "breaking",
+    "score": 66.6,
+    "queued_at": "2026-09-06T06:03:06.098299+00:00",
+    "is_breaking": true,
+    "category_tier": 2,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "U.S. Strikes Three Iranian ‘Shadow Network’ Oil Tankers, Military Says",
+    "source_name": "NYT > World News",
+    "source_url": "https://www.nytimes.com/2026/09/05/world/middleeast/iran-us-kharg-oil-tanker-attack.html",
+    "category": "breaking",
+    "score": 63.3,
+    "queued_at": "2026-09-06T06:06:25.781511+00:00",
+    "is_breaking": true,
+    "category_tier": 2,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "A young mom was near death from lead poisoning. Who was trying to kill her?",
+    "source_name": "Home - CBSNews.com",
+    "source_url": "https://www.cbsnews.com/news/hannah-pettey-brian-mann-alabama-lead-poisoning-attempted-murder-48-hours/",
+    "category": "breaking",
+    "score": 62.2,
+    "queued_at": "2026-09-06T06:06:25.789248+00:00",
+    "is_breaking": true,
+    "category_tier": 2,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "The pressure on Burnham to appease the right is huge. But now is the time to step out of Reform’s shadow | Andy Beckett",
+    "source_name": "Politics | The Guardian",
+    "source_url": "https://www.theguardian.com/commentisfree/2026/sep/05/andy-burnham-reform-uk-labour-rightwing-voters",
+    "category": "politics",
+    "score": 84.7,
+    "queued_at": "2026-09-06T06:26:54.391930+00:00",
+    "is_breaking": true,
+    "category_tier": 1,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "Falklands row shows urgent need to commit to 3% target, says Labour defence committee chair",
+    "source_name": "World news | The Guardian",
+    "source_url": "https://www.theguardian.com/politics/2026/sep/06/falklands-row-raise-defence-spending-tan-dhesi-labour",
+    "category": "breaking",
+    "score": 83.4,
+    "queued_at": "2026-09-06T06:26:54.401491+00:00",
+    "is_breaking": true,
+    "category_tier": 1,
+    "published_at": null,
+    "status": "QUEUED"
+  },
+  {
+    "title": "‘The first half of my 20s was hell’: Maisie Williams on her tough childhood and why she’s been having more fun since Game of Thrones",
+    "source_name": "The Guardian",
+    "source_url": "https://www.theguardian.com/tv-and-radio/2026/sep/06/maisie-williams-actor-interview-game-of-thrones-practical-magic-2",
+    "category": "crime",
+    "score": 80.3,
+    "queued_at": "2026-09-06T06:26:54.451277+00:00",
+    "is_breaking": true,
+    "category_tier": 1,
+    "published_at": null,
+    "status": "QUEUED"
+  }
+]

@@ -85,8 +85,10 @@ def generate_post(story: Story) -> Story:
     if not post_content:
         raise GenerationError("LLM returned an empty post body.")
 
+    post_content = _format_post(post_content)
+
     story.post_content = post_content
-    story.hashtags = hashtags
+    story.hashtags     = hashtags
     return story
 
 
@@ -94,26 +96,39 @@ def generate_post(story: Story) -> Story:
 # Prompt construction
 # ---------------------------------------------------------------------------
 
-_SYSTEM_PROMPT = """You are a professional social media editor for a worldwide news Facebook Page called "World Update".
+_SYSTEM_PROMPT = """You are the Facebook News Publishing Agent for Global Pulse News.
 
-Your job is to write clear, factual, engaging Facebook posts based on verified news facts.
+YOUR ROLE:
+Write clear, factual, engaging Facebook posts based on verified news facts.
+Prioritize CONTENT QUALITY, NEWS VALUE, ORIGINALITY and TIMING over posting volume.
 
-Rules you must always follow:
+CONTENT RULES:
 - Never copy article text word-for-word. Write in your own words.
 - Use plain language suitable for a general worldwide audience.
-- Clearly label unconfirmed information with words like "reportedly", "according to sources", or "it is alleged".
-- Do not sensationalise or use clickbait headlines.
+- Clearly label unconfirmed information with "reportedly", "according to sources", or "it is alleged".
+- Do not sensationalise or use clickbait. Headlines must accurately represent the story.
 - Do not include personal opinions or commentary.
+- Never make misleading or exaggerated claims.
 - The post must feel informative and trustworthy.
 
-At the very end of the post, always include a sources line in this exact format:
+FORMATTING RULES (follow exactly):
+- Write in SHORT PARAGRAPHS — maximum 2-3 sentences per paragraph.
+- Put a BLANK LINE between every paragraph.
+- Start with the most important fact — the hook that stops the scroll.
+- DO NOT start with boring phrases like "In a significant development..." or "According to reports...".
+- The very first sentence must be punchy, direct, and make the reader want to keep reading.
+- Use 1-2 relevant emojis per paragraph as visual anchors — not decoration.
+- End with a direct QUESTION to the audience (e.g. "What do you think? Drop your opinion below 👇").
+- Keep total post length between 150-400 words. Concise wins on Facebook.
+
+At the very end of the post, always include:
 📰 Sources: <comma-separated source names>
 
-For hashtags:
-- Include 6-10 hashtags that are SPECIFIC to the story (people, places, events, topics involved).
-- Always include #WorldUpdate and #BreakingNews.
-- Use hashtags that people actually search for (e.g. #Nepal, #Flood, #DisasterRelief not just #News).
-- Mix broad tags (#WorldNews) with specific ones (#NepalFlood2026).
+HASHTAGS:
+- Include EXACTLY 3-5 hashtags.
+- Always include #GlobalPulseNews.
+- Use hashtags SPECIFIC to this story (people, places, events).
+- No generic spam tags.
 
 Output format (return exactly this structure, nothing else):
 POST:
@@ -122,6 +137,25 @@ POST:
 HASHTAGS:
 <comma-separated hashtags starting with #>
 """
+
+
+# Category emoji map — injected into the prompt so LLM uses the right one
+_CATEGORY_EMOJI = {
+    "breaking":      "🔴",
+    "technology":    "📱",
+    "business":      "💼",
+    "politics":      "🏛️",
+    "science":       "🔬",
+    "sports":        "🏆",
+    "trending":      "🔥",
+    "entertainment": "🎬",
+    "jobs":          "💼",
+    "world":         "🌍",
+    "crime":         "🚨",
+    "climate":       "🌿",
+    "war":           "⚔️",
+    "wellness":      "💪",
+}
 
 
 def _build_prompt(story: Story) -> str:
@@ -153,7 +187,10 @@ def _build_prompt(story: Story) -> str:
         ),
     }.get(story.verification_status, "")
 
-    return f"""Write a Facebook post about the following news story.
+    category    = getattr(story, "category", "breaking")
+    cat_emoji   = _CATEGORY_EMOJI.get(category, "🌍")
+
+    return f"""Write a Facebook post about the following news story for Global Pulse News.
 
 TITLE: {story.title}
 SOURCE: {story.source_name}
@@ -161,22 +198,67 @@ PUBLISHED: {published}
 SUMMARY: {story.raw_summary or "No summary available."}
 VERIFICATION: {verification_note}{corroborating_text}
 ALL SOURCES TO CITE: {', '.join(unique_source_names)}
+CATEGORY EMOJI: {cat_emoji} — use this emoji in your post where relevant.
 
-The post must contain:
-1. A strong, factual opening line (not clickbait)
-2. A concise summary (2-4 sentences)
-3. The key facts
-4. Context if needed
-5. A short closing statement
-6. A sources line at the very end: 📰 Sources: {', '.join(unique_source_names)}
+The post MUST follow this exact structure:
+1. HOOK — first sentence: the most striking/important fact. Direct, punchy, no boring openers.
+2. BODY — 2-3 short paragraphs (max 2-3 sentences each), blank line between each.
+3. CONTEXT — one short paragraph with background if relevant.
+4. CLOSING QUESTION — a direct question to the audience + 👇 emoji.
+5. SOURCES LINE — last line: 📰 Sources: {', '.join(unique_source_names)}
 
-For the HASHTAGS section, generate 6-10 hashtags that are:
-- Specific to the people, places, organisations, and events in THIS story
-- Mix of broad (#WorldNews) and specific (#NepalFlood2026, #Zelenskyy, #Ukraine)
-- Always include #WorldUpdate and #BreakingNews
-- Tags that people actually search for on Facebook
+HASHTAGS: generate EXACTLY 3-5 hashtags. Always include #GlobalPulseNews. Make them specific to this story.
 
 Write the post now."""
+
+
+# ---------------------------------------------------------------------------
+# Post formatting — enforce short paragraphs + question ending
+# ---------------------------------------------------------------------------
+
+_QUESTION_FALLBACKS = [
+    "What do you think about this? Share your thoughts below 👇",
+    "How do you see this unfolding? Drop your opinion below 👇",
+    "Do you think this will make a difference? Let us know below 👇",
+    "What's your take on this? Comment below 👇",
+]
+
+def _format_post(post: str) -> str:
+    """
+    1. Ensure blank lines between paragraphs (max 3 sentences per paragraph).
+    2. Ensure the post ends with an engagement question.
+    """
+    import random
+
+    # --- Paragraph splitting ---
+    # Collapse multiple blank lines → single blank line
+    post = re.sub(r"\n{3,}", "\n\n", post.strip())
+
+    # Split into existing paragraphs
+    paragraphs = [p.strip() for p in post.split("\n\n") if p.strip()]
+
+    # Split any paragraph with more than 3 sentences into smaller chunks
+    split_paragraphs: list[str] = []
+    for para in paragraphs:
+        sentences = re.split(r"(?<=[.!?])\s+", para)
+        chunk: list[str] = []
+        for sentence in sentences:
+            chunk.append(sentence)
+            if len(chunk) >= 3:
+                split_paragraphs.append(" ".join(chunk))
+                chunk = []
+        if chunk:
+            split_paragraphs.append(" ".join(chunk))
+
+    # --- Ensure closing question ---
+    last = split_paragraphs[-1] if split_paragraphs else ""
+    # Check if any of the last 2 paragraphs already has a question
+    tail = " ".join(split_paragraphs[-2:]) if len(split_paragraphs) >= 2 else last
+    has_question = "?" in tail or "👇" in tail
+    if not has_question:
+        split_paragraphs.append(random.choice(_QUESTION_FALLBACKS))
+
+    return "\n\n".join(split_paragraphs)
 
 
 # ---------------------------------------------------------------------------
