@@ -27,6 +27,11 @@ THRESHOLDS (after multiplier, capped at 100):
   70–79  → PUBLISH               → normal queue
   60–69  → SCHEDULE / HOLD       → filler only — publish if nothing better available
   < 60   → DO NOT PUBLISH        → rejected outright
+
+VERIFICATION GATE:
+  UNVERIFIED (0 corroborating sources) → score hard-capped at 55
+  → Falls below PUBLISH floor (60), surfaces only as HOLD on LOW_NEWS days
+  → Prevents quizzes, rumours, and opinion pieces from ever publishing normally
 """
 
 from __future__ import annotations
@@ -397,6 +402,26 @@ def score_story(story: Story) -> EditorialScore:
         total = min(total, _TIER3_SCORE_CAP)
 
     total = min(total, 100.0)
+
+    # --- Verification gate ---
+    # UNVERIFIED stories (0 corroborating sources) are capped:
+    #   Tier 1/2 source → cap at 65 (can pass on LOW NEWS DAY, floor=60)
+    #   Tier 3/4 source → cap at 55 (never publishes on normal days)
+    # This prevents quizzes, opinion pieces, and rumours from ever being published
+    # on normal or busy news days, while allowing authoritative single-source
+    # regional reporting (Dawn, NDTV, etc.) to surface on slow news days.
+    from models import VerificationStatus
+    v_status = getattr(story, "verification_status", None)
+    if v_status == VerificationStatus.UNVERIFIED:
+        source_tier = getattr(story, "source_tier", 4)
+        unverified_cap = 65.0 if source_tier <= 2 else 55.0
+        if total > unverified_cap:
+            logger.debug(
+                "🔒 UNVERIFIED cap applied (%.1f → %.1f) [T%d]: %s",
+                total, unverified_cap, source_tier, title[:65]
+            )
+            total = unverified_cap
+
     tier  = _classify_tier(total)
 
     reason = _build_reason(

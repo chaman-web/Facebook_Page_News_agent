@@ -38,12 +38,18 @@ class Story:
     published_at: datetime
     raw_summary: str
 
+    # --- Source quality (assigned at fetch time) ---
+    source_tier: int = 4             # SourceTier int (1=wire, 2=established, 3=specialist, 4=blog, 5=unreliable)
+    confidence: str = "LOW"          # HIGH / GOOD / LOW / REJECT (from clusterer)
+    cluster_size: int = 1            # Number of articles reporting the same event
+
     # --- Verification ---
     corroborating_sources: list[dict] = field(default_factory=list)
     verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
 
     # --- Generation ---
     post_content: str | None = None
+    card_headline: str | None = None   # short punchy headline for the image card
     hashtags: list[str] = field(default_factory=list)
     category: str = "breaking"  # news category slug
 

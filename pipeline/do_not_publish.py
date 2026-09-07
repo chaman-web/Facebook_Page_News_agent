@@ -1,36 +1,41 @@
 """
 pipeline/do_not_publish.py — Pre-queue editorial gate for Global Pulse News.
 
-This gate runs BEFORE a story enters the posting queue.
-Every check returns a DNPVerdict with a decision (PUBLISH / HOLD / REJECT)
-and a reason. Nothing passes silently — every story gets a logged decision.
+REJECT only when the problem affects:
+  → Accuracy / unsupported major claim
+  → Source reliability (known misinformation domain)
+  → Duplication (exact URL or near-identical story)
+  → Clearly unsuitable content (engagement bait, removed article)
+
+HOLD when the story needs more time/corroboration but may be real:
+  → Too fresh with no corroboration (velocity)
+  → Weak attribution only (no official confirmation yet)
+  → Headline stronger than the body suggests
+
+NEVER reject for fixable problems:
+  → Image issues          → image retry loop handles this
+  → Short summary         → enrichment + shorter post handles this
+  → Caption quality       → generator handles this
 
 Checks (in order):
-
-  1.  DUPLICATE URL            → REJECT   (already published this exact story)
-  2.  SIMILAR TITLE            → HOLD     (substantially same story, different source)
-  3.  TOO OLD                  → REJECT   (story exceeds NEWS_MAX_AGE_HOURS)
+  1.  DUPLICATE URL            → REJECT
+  2.  SIMILAR TITLE            → HOLD
+  3.  TOO OLD                  → REJECT
   4.  WEAK SOURCE              → HOLD     (unverified domain, needs corroboration)
   5.  UNRELIABLE SOURCE        → REJECT   (known misinformation domain)
-  6.  MISLEADING HEADLINE      → REJECT   (clickbait, sensationalism, fabrication signals)
-  7.  NO MEANINGFUL CONTENT    → REJECT   (empty title/summary, removed article)
-  8.  ENGAGEMENT BAIT          → REJECT   (trending only because of bait, not news value)
-  9.  LOW NEWS VALUE           → REJECT   (score < minimum threshold)
-  10. IMAGE MISMATCH           → REJECT   (image provided but topic clearly doesn't match)
-  11. NO DEVELOPMENT           → REJECT   (story is a recap/roundup with no new facts)
-  12. HEADLINE-BODY MISMATCH   → HOLD     (title makes claims not supported by summary)
-  13. STORY VELOCITY           → HOLD     (too fresh, zero corroboration — unverified breaking)
-  14. WEAK ATTRIBUTION         → HOLD     (entire story built on anonymous/unverified claims)
-
-Decision hierarchy:
-  REJECT > HOLD > PUBLISH
-  If any check returns REJECT → story is rejected outright.
-  If any check returns HOLD   → story is held (not queued) until next run.
-  PUBLISH means all checks passed.
+  6.  MISLEADING HEADLINE      → REJECT   (clickbait / fabrication signals)
+  7.  NO MEANINGFUL CONTENT    → REJECT   (empty title, removed article)
+  8.  ENGAGEMENT BAIT          → REJECT
+  9.  LOW NEWS VALUE           → REJECT   (score < 60)
+  10. NO DEVELOPMENT           → HOLD     (recap/roundup — not outright reject)
+  11. HEADLINE-BODY MISMATCH   → HOLD     (number/verb not supported by body)
+  12. STORY VELOCITY           → HOLD     (too fresh, zero corroboration)
+  13. WEAK ATTRIBUTION         → HOLD     (anonymous sources, no official confirmation)
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -67,19 +72,43 @@ class DNPVerdict:
 
 
 # ---------------------------------------------------------------------------
-# Recently published titles — in-memory ring buffer (last 50)
+# Recently published titles — persisted to disk so duplicates survive process restarts
 # Used for check #2 (similar title to recently published story)
 # ---------------------------------------------------------------------------
 _RECENT_PUBLISHED_TITLES: list[str] = []
-_MAX_RECENT_TITLES = 50
+_MAX_RECENT_TITLES = 100
 _SIMILAR_TITLE_THRESHOLD = 0.72   # 72% similarity = substantially same story
+_PUBLISHED_TITLES_FILE = Path("published_titles.json")
+
+
+def _load_published_titles() -> None:
+    """Load published titles from disk into memory on module import."""
+    global _RECENT_PUBLISHED_TITLES
+    try:
+        if _PUBLISHED_TITLES_FILE.exists():
+            _RECENT_PUBLISHED_TITLES = json.loads(
+                _PUBLISHED_TITLES_FILE.read_text(encoding="utf-8")
+            )
+    except Exception:
+        _RECENT_PUBLISHED_TITLES = []
 
 
 def record_published_title(title: str) -> None:
-    """Call this after every successful publish to feed check #2."""
+    """Call this after every successful publish — persists to disk immediately."""
     _RECENT_PUBLISHED_TITLES.append(title.lower().strip())
     if len(_RECENT_PUBLISHED_TITLES) > _MAX_RECENT_TITLES:
         _RECENT_PUBLISHED_TITLES.pop(0)
+    try:
+        _PUBLISHED_TITLES_FILE.write_text(
+            json.dumps(_RECENT_PUBLISHED_TITLES, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        logger.warning("Could not persist published titles: %s", exc)
+
+
+# Load on import so every process starts with full history
+_load_published_titles()
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +227,12 @@ def check_do_not_publish(
         _check_misleading_headline,
         _check_engagement_bait,
         _check_no_development,
-        _check_story_velocity,         # NEW #13
-        _check_weak_attribution,       # NEW #14
-        _check_headline_body_mismatch, # NEW #12
+        _check_story_velocity,
+        _check_weak_attribution,
+        _check_headline_body_mismatch,
         lambda s: _check_low_news_value(s, editorial_score),
-        lambda s: _check_image_mismatch(s, image_query),
+        # IMAGE_MISMATCH removed — image quality is handled by the image retry loop,
+        # not by this gate. Never reject a story because of an image problem.
     ]
 
     verdicts: list[DNPVerdict] = []
@@ -291,6 +321,8 @@ def _check_duplicate_url(story: Story) -> DNPVerdict:
 def _check_similar_title(story: Story) -> DNPVerdict:
     """Check #2 — substantially similar to a recently published story."""
     norm = _normalise(story.title)
+
+    # 1. Character-sequence similarity (catches near-identical titles)
     for recent in _RECENT_PUBLISHED_TITLES:
         ratio = SequenceMatcher(None, norm, recent).ratio()
         if ratio >= _SIMILAR_TITLE_THRESHOLD:
@@ -298,6 +330,29 @@ def _check_similar_title(story: Story) -> DNPVerdict:
                 DNPDecision.HOLD, "SIMILAR_TITLE",
                 f"Title is {ratio:.0%} similar to recently published story.",
             )
+
+    # 2. Topic overlap — if 3+ meaningful keywords overlap, same story different angle
+    _stop = {"the","a","an","and","or","but","in","on","at","to","for","of","with",
+             "by","from","as","is","was","are","were","be","been","its","this","that",
+             "says","said","new","more","than","up","out","after","before","about",
+             "just","over","not","has","have","had","will","would","could","should",
+             "their","they","who","what","how","why","when","where","which"}
+
+    def keywords(text: str) -> set[str]:
+        return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _stop}
+
+    new_kw = keywords(story.title)
+    if len(new_kw) >= 3:
+        for recent in _RECENT_PUBLISHED_TITLES:
+            overlap = new_kw & keywords(recent)
+            # 2+ shared meaningful keywords AND at least 40% of new title's keywords overlap
+            if len(overlap) >= 2 and len(overlap) / len(new_kw) >= 0.40:
+                return DNPVerdict(
+                    DNPDecision.HOLD, "SIMILAR_TITLE",
+                    f"Same topic as recently published story "
+                    f"(shared keywords: {', '.join(sorted(overlap)[:5])}).",
+                )
+
     return DNPVerdict(DNPDecision.PUBLISH, "SIMILAR_TITLE", "")
 
 
@@ -340,13 +395,13 @@ def _check_engagement_bait(story: Story) -> DNPVerdict:
 
 
 def _check_no_development(story: Story) -> DNPVerdict:
-    """Check #11 — story is a recap/roundup/explainer with no new facts."""
+    """Check — story is a recap/roundup/explainer with no new facts. HOLD, not REJECT."""
     title = (story.title or "").lower()
     for pattern in _NO_DEVELOPMENT_PATTERNS:
         if re.search(pattern, title, re.IGNORECASE):
             return DNPVerdict(
-                DNPDecision.REJECT, "NO_DEVELOPMENT",
-                f"Story appears to be a recap/roundup with no new development.",
+                DNPDecision.HOLD, "NO_DEVELOPMENT",
+                "Story appears to be a recap/roundup — holding, not rejecting.",
             )
     return DNPVerdict(DNPDecision.PUBLISH, "NO_DEVELOPMENT", "")
 
@@ -443,18 +498,14 @@ _TRUSTED_FAST_SOURCES = {
 # ---------------------------------------------------------------------------
 
 _WEAK_ATTRIBUTION_PHRASES = [
-    r"\bsources? (familiar with|close to|with knowledge of|told\b)",
+    # These signal genuinely unverified single-anonymous-source stories
+    r"\bsources? (familiar with|close to|with knowledge of) (the matter|the situation)\b",
     r"\baccording to (anonymous|unnamed|undisclosed|unidentified) sources?\b",
     r"\bwho (spoke|asked) (on|for) (the )?condition of anonymity\b",
-    r"\bsources? say\b",
-    r"\bunconfirmed (report|claim|source)\b",
-    r"\ballegedly\b",
-    r"\bhas not (confirmed|verified|responded)\b",
     r"\bcould not (independently )?verify\b",
-    r"\bsaid to (have|be)\b",
-    r"\bpurportedly\b",
-    r"\bapparently\b",
-    r"\bclaims? to (have|show|prove)\b",
+    r"\bunconfirmed (report|claim)\b",
+    # NOTE: "allegedly", "reportedly", "sources say" are standard journalistic hedges —
+    # they are NOT held because they appear in legitimate verified reporting.
 ]
 
 # If the summary contains these, attribution is strong → override weak signals
@@ -469,7 +520,7 @@ _STRONG_ATTRIBUTION_PHRASES = [
     r"\bofficially (confirmed|announced|declared)\b",
 ]
 
-# Only trigger weak-attribution hold if this many weak phrases are found
+# Require 2+ genuine weak signals (not just hedging language) before holding
 _WEAK_ATTRIBUTION_THRESHOLD = 2
 
 
@@ -481,10 +532,10 @@ def _check_headline_body_mismatch(story: Story) -> DNPVerdict:
     """
     Headline makes claims the summary doesn't support.
 
-    Two sub-checks:
-      a) Numeric mismatch: a large number in the title doesn't appear in summary.
-      b) Strong verb mismatch: headline uses confirm/arrest/bomb etc but
-         no matching word appears in the summary.
+    Only flags genuine count mismatches (deaths, casualties, people, dollars ≥100).
+    Never flags years (2024, 2025, 2026) — those are dates, not counts.
+    Strong verb mismatch: headline uses confirm/arrest/bomb etc but no matching
+    word appears in the summary.
     """
     title   = story.title or ""
     summary = (story.raw_summary or "").strip()
@@ -492,14 +543,23 @@ def _check_headline_body_mismatch(story: Story) -> DNPVerdict:
     if not summary or len(summary) < 30:
         return DNPVerdict(DNPDecision.PUBLISH, "HEADLINE_BODY_MISMATCH", "")
 
-    # --- a) Numeric mismatch ---
+    # --- a) Numeric mismatch — ignore years and small numbers ---
     title_nums   = set(re.findall(r"\b\d[\d,]*\b", title))
     summary_nums = set(re.findall(r"\b\d[\d,]*\b", summary))
-    significant  = {n for n in title_nums if int(n.replace(",", "")) >= 10}
+
+    def _is_year(n: str) -> bool:
+        v = int(n.replace(",", ""))
+        return 1900 <= v <= 2100
+
+    # Only care about numbers ≥100 that are NOT years (actual counts)
+    significant = {
+        n for n in title_nums
+        if int(n.replace(",", "")) >= 100 and not _is_year(n)
+    }
     if significant and not (significant & summary_nums):
         return DNPVerdict(
             DNPDecision.HOLD, "HEADLINE_BODY_MISMATCH",
-            f"Title claims number(s) {significant} not found in summary — "
+            f"Title claims count(s) {significant} not found in summary — "
             "possible exaggeration or outdated figure.",
         )
 
@@ -509,8 +569,7 @@ def _check_headline_body_mismatch(story: Story) -> DNPVerdict:
             if not re.search(rf"\b{verb}(s|ed|ing|ation|ment)?\b", summary, re.IGNORECASE):
                 return DNPVerdict(
                     DNPDecision.HOLD, "HEADLINE_BODY_MISMATCH",
-                    f"Title uses strong verb '{verb}' but summary has no supporting text. "
-                    "Headline may be stronger than the story.",
+                    f"Title uses strong verb '{verb}' but summary has no supporting text.",
                 )
 
     return DNPVerdict(DNPDecision.PUBLISH, "HEADLINE_BODY_MISMATCH", "")

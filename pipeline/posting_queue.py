@@ -77,7 +77,7 @@ AUDIT_FILE   = Path("posting_decisions.jsonl")
 # Scheduled posting windows (local time HH:MM) — must match scheduler.py
 # ---------------------------------------------------------------------------
 
-SCHEDULED_WINDOWS = ["07:30", "12:30", "19:30"]
+SCHEDULED_WINDOWS = ["08:00", "13:00", "19:00"]  # UTC — peak global engagement windows
 
 # How many minutes before/after a window is "close enough" to count as in-window
 WINDOW_TOLERANCE_MINUTES = 15
@@ -228,6 +228,10 @@ class QueueEntry:
     published_at:   Optional[str] = None
     status:         str           = "QUEUED"   # QUEUED | PUBLISHED | SKIPPED | EXPIRED
     downgraded_from: Optional[str] = None      # original lane before TTL downgrade
+    image_path:     Optional[str] = None       # pre-rendered image card path (set before queue)
+    post_content:   Optional[str] = None       # pre-generated Facebook post copy
+    card_headline:  Optional[str] = None       # AI-generated punchy card headline
+    hashtags:       Optional[list] = None      # pre-generated hashtags
 
     @property
     def route_enum(self) -> Route:
@@ -259,11 +263,26 @@ class PostingQueue:
     # Public interface
     # ------------------------------------------------------------------
 
-    def add(self, story: Story, score: float, effective_tier: int | None = None) -> None:
+    def add(
+        self,
+        story: Story,
+        score: float,
+        effective_tier: int | None = None,
+        image_path: Optional[str] = None,
+        post_content: Optional[str] = None,
+        card_headline: Optional[str] = None,
+        hashtags: Optional[list] = None,
+    ) -> None:
         """Route and enqueue a story. Silently ignores duplicates."""
+        # 1. Exact URL already in queue
         for e in self._entries:
             if e.source_url == story.source_url:
                 return
+
+        # 2. Similar topic already queued or published — block same-event duplicates
+        if self._is_duplicate_topic(story.title):
+            logger.debug("🗑️  Duplicate topic blocked from queue: %s", story.title[:60])
+            return
 
         cat      = getattr(story, "category", "breaking")
         tier_num = effective_tier if effective_tier is not None else CATEGORY_TIERS.get(cat, 2)
@@ -284,6 +303,10 @@ class PostingQueue:
             is_breaking   = lane == Route.PUBLISH_NOW,
             category_tier = tier_num,
             route         = lane.value,
+            image_path    = str(image_path) if image_path else None,
+            post_content  = post_content,
+            card_headline = card_headline,
+            hashtags      = hashtags,
         )
         self._entries.append(entry)
         self._save()
@@ -335,9 +358,9 @@ class PostingQueue:
                 f"only 🚨 PUBLISH_NOW passes (need {DEAD_HOURS_MIN_SCORE:.0f}, have {score:.0f})"
             )
 
-        # 4. Per-tier slot cap
+        # 4. Per-tier slot cap — PUBLISH_NOW bypasses cap (breaking news always goes through)
         tier_count = self._tier_daily_count(tier)
-        if tier_count >= TIER_DAILY_SLOTS[tier]:
+        if tier_count >= TIER_DAILY_SLOTS[tier] and lane != Route.PUBLISH_NOW:
             return False, f"Tier {tier} slot cap ({tier_count}/{TIER_DAILY_SLOTS[tier]})"
 
         # 5. Audience fatigue (Tier 1 exempt)
@@ -355,6 +378,18 @@ class PostingQueue:
         cat_premium   = self._category_repeat_premium(entry.category, now)
         topic_penalty = self._topic_repeat_penalty(entry.title, now)
         min_score    += cat_premium + topic_penalty
+
+        # South Asia regional exemption — Pakistan / India stories get a
+        # 15-point floor reduction to ensure regional coverage is not
+        # starved out by thin RSS summaries.
+        SOUTH_ASIA_KEYWORDS = [
+            "pakistan", "india", "islamabad", "karachi", "lahore", "delhi",
+            "mumbai", "kashmir", "sindh", "punjab", "modi", "nawaz", "imran",
+            "indian", "pakistani", "bangladesh", "karnataka",
+        ]
+        title_lower = entry.title.lower()
+        if any(k in title_lower for k in SOUTH_ASIA_KEYWORDS):
+            min_score = max(min_score - 15.0, SCORE_HOLD)
 
         if score < min_score:
             parts = [f"base={self._min_score_for(lane, day_type):.0f}"]
@@ -657,6 +692,60 @@ class PostingQueue:
         return False, reason
 
     # ------------------------------------------------------------------
+    # Duplicate topic detection
+    # ------------------------------------------------------------------
+
+    def _is_duplicate_topic(self, title: str) -> bool:
+        """
+        Returns True if this title covers the same event as a story already
+        in the queue or previously published.
+        Uses two signals:
+          1. SequenceMatcher ratio >= 0.72 (near-identical wording)
+          2. Keyword overlap >= 3 words AND >= 45% of title keywords match
+        """
+        from difflib import SequenceMatcher
+        import json as _json
+        from pathlib import Path as _Path
+
+        _stop = {
+            "the","a","an","and","or","but","in","on","at","to","for","of","with",
+            "by","from","as","is","was","are","were","be","been","its","this","that",
+            "says","said","new","more","than","up","out","after","before","about",
+            "just","over","not","has","have","had","will","would","could","should",
+        }
+
+        def kw(text: str) -> set[str]:
+            return {w for w in re.findall(r"[a-z]{4,}", text.lower()) if w not in _stop}
+
+        def norm(text: str) -> str:
+            return re.sub(r"[^a-z0-9 ]", " ", text.lower()).strip()
+
+        new_norm = norm(title)
+        new_kw   = kw(title)
+
+        # Collect all comparison titles: queued + published entries
+        compare: list[str] = [e.title for e in self._entries
+                               if e.status in ("QUEUED", "PUBLISHED")]
+        try:
+            pf = _Path("published_titles.json")
+            if pf.exists():
+                compare += _json.loads(pf.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+        for other in compare:
+            # Signal 1: near-identical wording
+            if SequenceMatcher(None, new_norm, norm(other)).ratio() >= 0.72:
+                return True
+            # Signal 2: same topic, different wording
+            if len(new_kw) >= 4:
+                overlap = new_kw & kw(other)
+                if len(overlap) >= 3 and len(overlap) / len(new_kw) >= 0.45:
+                    return True
+
+        return False
+
+    # ------------------------------------------------------------------
     # Feature #4 — Audit log
     # ------------------------------------------------------------------
 
@@ -815,7 +904,9 @@ class PostingQueue:
 
     def _min_score_for(self, lane: Route, day_type: str) -> float:
         if lane == Route.PUBLISH_NOW: return 0.0
-        if lane == Route.NEXT_SLOT:   return SCORE_NEXT_SLOT
+        if lane == Route.NEXT_SLOT:
+            # On slow news days, lower the bar so good-enough stories still go out
+            return SCORE_SCHEDULE if day_type == DayType.LOW_NEWS else SCORE_NEXT_SLOT
         if lane == Route.SCHEDULE:
             return LOW_NEWS_FLOOR if day_type == DayType.LOW_NEWS else SCORE_SCHEDULE
         if lane == Route.HOLD:        return SCORE_HOLD
@@ -830,11 +921,20 @@ class PostingQueue:
             return
         try:
             data = json.loads(QUEUE_FILE.read_text(encoding="utf-8"))
+            # Support both formats: {"entries": [...]} and bare [...]
+            if isinstance(data, dict):
+                entries_raw = data.get("entries", [])
+            else:
+                entries_raw = data
             self._entries = []
-            for e in data:
+            for e in entries_raw:
                 e.setdefault("category_tier",   CATEGORY_TIERS.get(e.get("category", "breaking"), 2))
                 e.setdefault("route",            Route.SCHEDULE.value)
                 e.setdefault("downgraded_from",  None)
+                e.setdefault("image_path",       None)
+                e.setdefault("post_content",     None)
+                e.setdefault("card_headline",    None)
+                e.setdefault("hashtags",         None)
                 self._entries.append(QueueEntry(**e))
         except Exception as exc:
             logger.warning("Could not load posting queue (%s) — starting fresh.", exc)
@@ -843,7 +943,10 @@ class PostingQueue:
     def _save(self) -> None:
         try:
             QUEUE_FILE.write_text(
-                json.dumps([e.__dict__ for e in self._entries], indent=2, ensure_ascii=False),
+                json.dumps(
+                    {"entries": [e.__dict__ for e in self._entries]},
+                    indent=2, ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
         except Exception as exc:

@@ -50,6 +50,13 @@ CATEGORIES: dict[str, dict] = {
             "https://feeds.npr.org/1001/rss.xml",
             "https://www.cbsnews.com/latest/rss/main",
             "https://feeds.washingtonpost.com/rss/world",
+            # South Asia
+            "https://www.dawn.com/feeds/home",
+            "https://geo.tv/rss/10",
+            "https://feeds.feedburner.com/ndtvnews-top-stories",
+            "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
+            "https://www.thehindu.com/feeder/default.rss",
+            "https://www.thenews.com.pk/rss/1/1",
         ],
     },
     "technology": {
@@ -103,6 +110,10 @@ CATEGORIES: dict[str, dict] = {
             "https://www.axios.com/feeds/feed.rss",
             "https://feeds.npr.org/1014/rss.xml",
             "https://rss.nytimes.com/services/xml/rss/nyt/Washington.xml",
+            # South Asia politics
+            "https://www.dawn.com/feeds/political",
+            "https://feeds.feedburner.com/ndtvnews-india-news",
+            "https://www.thehindu.com/news/national/feeder/default.rss",
         ],
     },
     "science": {

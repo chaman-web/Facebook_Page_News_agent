@@ -89,7 +89,7 @@ SEEN_STORIES_PATH = "seen_stories.json"
 DRAFTS_DIR = "drafts"
 
 # Duplicate detection threshold (0.0 – 1.0)
-DUPLICATE_TITLE_THRESHOLD = 0.85
+DUPLICATE_TITLE_THRESHOLD = 0.92
 
 # ---------------------------------------------------------------------------
 # Facebook publishing (Phase 3 — only needed when using --publish)
