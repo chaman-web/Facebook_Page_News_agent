@@ -26,9 +26,15 @@ def save_draft(story: Story) -> str:
 
     Returns the path to the JSON draft file.
     """
-    # Determine final draft status — all non-rejected stories are ready to publish
-    if story.draft_status != DraftStatus.REJECTED:
+    # Only independently verified stories are ready for review/publishing.
+    # Powerful single-source stories remain DRAFT so they are preserved without
+    # entering the automatic publishing path.
+    if story.draft_status == DraftStatus.REJECTED:
+        pass
+    elif story.verification_status == VerificationStatus.VERIFIED:
         story.draft_status = DraftStatus.READY_FOR_REVIEW
+    else:
+        story.draft_status = DraftStatus.DRAFT
 
     story.generated_at = datetime.now(timezone.utc)
 
@@ -68,7 +74,12 @@ def _write_json(story: Story, path: Path) -> None:
         "published_at": story.published_at.isoformat(),
         "news_summary": story.raw_summary,
         "verification_status": story.verification_status.value,
+        "verification_score": story.verification_score,
+        "verification_reason": story.verification_reason,
+        "verification_evidence": story.verification_evidence,
         "corroborating_sources": story.corroborating_sources,
+        "article_text": story.article_text,
+        "article_image_url": story.article_image_url,
         "post_content": story.post_content,
         "hashtags": story.hashtags,
         "draft_status": story.draft_status.value,
@@ -122,9 +133,12 @@ def _write_markdown(story: Story, path: Path) -> None:
 | Source | [{story.source_name}]({story.source_url}) |
 | Published | {published} |
 | Verification | {story.verification_status.value} |
+| Verification score | {story.verification_score:.0f}/100 |
 | Generated | {generated} |
 
 {corroborating_md}{rejection_md}
+**Verification reason:** {story.verification_reason or "Not recorded."}
+
 ---
 
 ## News Summary

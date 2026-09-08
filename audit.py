@@ -29,7 +29,9 @@ from collections import Counter, defaultdict
 from datetime import datetime, date, timedelta, timezone
 from pathlib import Path
 
-AUDIT_FILE = Path("posting_decisions.jsonl")
+import config
+
+AUDIT_FILE = config.POSTING_DECISIONS_PATH
 
 LANE_ICONS = {
     "PUBLISH_NOW": "🚨",

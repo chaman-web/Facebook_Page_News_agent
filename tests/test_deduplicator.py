@@ -98,12 +98,12 @@ class TestCheckDuplicate:
 
 class TestMarkSeen:
 
-    def test_mark_seen_appends_url_and_title(self, tmp_path):
+    def test_permanent_mark_seen_appends_url_and_title(self, tmp_path):
         seen_path = _write_seen(tmp_path, {"urls": [], "titles": []})
         story = _story("Major Summit Begins in Geneva", "https://example.com/summit")
 
         with patch("config.SEEN_STORIES_PATH", str(seen_path)):
-            mark_seen(story)
+            mark_seen(story, permanent=True)
             data = json.loads(seen_path.read_text())
 
         assert "https://example.com/summit" in data["urls"]

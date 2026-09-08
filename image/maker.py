@@ -277,8 +277,8 @@ def create_news_image(story: Story) -> Optional[Path]:
       Attempt 3 — new photo fetch (different keyword), standard overlays.
       If all 3 fail → log all failures and return None (text-only post).
     """
-    IMAGES_DIR = Path("images")
-    IMAGES_DIR.mkdir(exist_ok=True)
+    IMAGES_DIR = config.IMAGES_DIR
+    IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
     cat = getattr(story, "category", "breaking")
     _CATEGORY_FALLBACK: dict[str, str] = {

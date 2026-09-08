@@ -46,6 +46,11 @@ class Story:
     # --- Verification ---
     corroborating_sources: list[dict] = field(default_factory=list)
     verification_status: VerificationStatus = VerificationStatus.UNVERIFIED
+    verification_score: float = 0.0
+    verification_reason: str = ""
+    verification_evidence: list[dict] = field(default_factory=list)
+    article_text: str = ""
+    article_image_url: str | None = None
 
     # --- Generation ---
     post_content: str | None = None

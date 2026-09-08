@@ -15,9 +15,11 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import config
+
 logger = logging.getLogger(__name__)
 
-HEALTH_FILE         = Path("source_health.json")
+HEALTH_FILE         = config.SOURCE_HEALTH_PATH
 BAN_DURATION_H      = 12     # hours to ban a failing source
 DUPLICATE_THRESHOLD = 0.8    # ban if 80%+ of stories are duplicates
 

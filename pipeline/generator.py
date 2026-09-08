@@ -168,20 +168,31 @@ def _enrich_story_context(story: Story) -> Story:
     """
     summary = story.raw_summary or ""
 
-    # Already rich enough
-    if len(summary) >= 200:
+    # Already rich enough and deep verification found no additional body text.
+    if len(summary) >= 200 and not story.article_text:
         return story
 
     enriched_parts: list[str] = [summary]
 
+    # Deep verification may have extracted the public article body. It is kept
+    # separate from the feed summary for auditability, then supplied as context.
+    if story.article_text and story.article_text not in summary:
+        enriched_parts.append(story.article_text)
+
     # Pull from corroborating sources if they carry extra text
     if story.corroborating_sources:
         for src in story.corroborating_sources:
-            extra = src.get("description") or src.get("content") or src.get("summary") or ""
+            extra = (
+                src.get("article_text")
+                or src.get("description")
+                or src.get("content")
+                or src.get("summary")
+                or ""
+            )
             if extra and extra not in summary:
                 enriched_parts.append(extra)
 
-    combined = " ".join(p.strip() for p in enriched_parts if p.strip())
+    combined = " ".join(p.strip() for p in enriched_parts if p.strip())[:6_000]
 
     if len(combined) > len(summary):
         logger.info(
@@ -307,10 +318,13 @@ def _build_prompt(story: Story) -> str:
         )
 
     verification_note = {
-        VerificationStatus.VERIFIED: "This story has been confirmed by multiple reliable sources.",
+        VerificationStatus.VERIFIED: (
+            story.verification_reason
+            or "This story has consistent reporting from independent reliable sources."
+        ),
         VerificationStatus.UNVERIFIED: (
-            "This story is from a single source and has not been independently confirmed. "
-            "Label any unconfirmed claims appropriately."
+            (story.verification_reason or "This story has not been independently confirmed.")
+            + " Label unconfirmed claims appropriately."
         ),
     }.get(story.verification_status, "")
 

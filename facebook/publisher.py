@@ -22,7 +22,7 @@ import requests
 
 import config
 from facebook.token_manager import TokenExpiredError, TokenManager
-from models import DraftStatus, Story
+from models import DraftStatus, Story, VerificationStatus
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +116,11 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
         raise FacebookPublishError(
             f"Cannot publish a draft with status '{story.draft_status.value}'. "
             "Only READY_FOR_REVIEW drafts can be published."
+        )
+
+    if story.verification_status != VerificationStatus.VERIFIED:
+        raise FacebookPublishError(
+            "Cannot publish a story without independent-source verification."
         )
 
     if not story.post_content:

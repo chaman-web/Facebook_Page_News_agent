@@ -1,115 +1,178 @@
-"""
-pipeline/verifier.py — Story verification using cluster confidence.
+"""Evidence-based story verification.
 
-After clustering, each story already has:
-  - story.confidence    (HIGH / GOOD / LOW / REJECT from clusterer)
-  - story.source_tier   (1–5)
-  - story.corroborating_sources (other cluster members)
-
-This module translates that cluster confidence into VerificationStatus
-and applies the final gate: REJECT stories with no reliable source.
-
-Confidence → VerificationStatus mapping:
-  HIGH   → VERIFIED    (full editorial score)
-  GOOD   → VERIFIED    (full editorial score)
-  LOW    → UNVERIFIED  (score capped at 55, HOLD filler only)
-  REJECT → StoryRejected (never published)
+Discovery confidence and editorial importance are deliberately separate here.
+A story is VERIFIED only when at least two independent, reliable domains report
+the same event without a material claim conflict. Strong single-source stories
+remain UNVERIFIED so they can be drafted for review without being auto-published.
 """
 
 from __future__ import annotations
 
 import logging
-from urllib.parse import urlparse
 
+import config
 from models import Story, StoryRejected, VerificationStatus
-from pipeline.source_classifier import Confidence, SourceTier, TIER5_DOMAINS
+from news.article_extractor import fetch_article
+from pipeline.claim_matcher import compare_reports
+from pipeline.source_classifier import (
+    Confidence,
+    SourceTier,
+    TIER5_DOMAINS,
+    canonical_domain,
+)
 
 logger = logging.getLogger(__name__)
 
+MIN_INDEPENDENT_SOURCES = max(2, int(config.NEWS_MIN_SOURCES))
+MAX_DEEP_CORROBORATORS = 2
 
-# ---------------------------------------------------------------------------
-# Public interface
-# ---------------------------------------------------------------------------
 
-def verify_story(story: Story) -> Story:
-    """
-    Apply the final verification gate based on cluster confidence.
+def verify_story(story: Story, deep: bool = False) -> Story:
+    """Verify source independence and agreement, optionally reading source pages."""
+    domain = canonical_domain(story.source_url)
+    source_tier = int(getattr(story, "source_tier", SourceTier.TIER4))
 
-    Raises StoryRejected if:
-      - Source is Tier 5 (unreliable domain)
-      - Confidence is REJECT (no Tier 1–3 source in cluster)
-
-    Sets story.verification_status:
-      - HIGH / GOOD confidence → VERIFIED
-      - LOW confidence         → UNVERIFIED (score capped at 55 by scorer)
-    """
-    # Hard reject — Tier 5 source
-    domain = _domain(story.source_url)
-    if domain in TIER5_DOMAINS:
+    if domain in TIER5_DOMAINS or source_tier == int(SourceTier.TIER5):
         story.verification_status = VerificationStatus.SPECULATIVE
-        raise StoryRejected(f"Source domain '{domain}' is on the unreliable list.")
+        story.verification_score = 0.0
+        story.verification_reason = f"Unreliable source: {domain or story.source_name}."
+        raise StoryRejected(story.verification_reason)
 
-    # Hard reject — source tier 5 by classification
-    source_tier = getattr(story, "source_tier", 4)
-    if source_tier == SourceTier.TIER5 or source_tier == 5:
+    if getattr(story, "confidence", Confidence.LOW) == Confidence.REJECT:
         story.verification_status = VerificationStatus.SPECULATIVE
-        raise StoryRejected(f"Source '{story.source_name}' classified as Tier 5 (unreliable).")
+        story.verification_score = 0.0
+        story.verification_reason = "No reliable primary source is available."
+        raise StoryRejected(story.verification_reason)
 
-    confidence = getattr(story, "confidence", Confidence.LOW)
-    corr_count = len(story.corroborating_sources or [])
+    if deep:
+        _enrich_from_source_pages(story)
 
-    logger.info(
-        "Verification: [%s | T%s | %d corroborating] '%s'",
-        confidence,
-        source_tier,
-        corr_count,
-        story.title,
-    )
+    primary_text = story.article_text or story.raw_summary or ""
+    evidence: list[dict] = [{
+        "name": story.source_name,
+        "url": story.source_url,
+        "domain": domain,
+        "tier": source_tier,
+        "role": "primary",
+        "independent": True,
+        "claim_agreement": 1.0,
+        "matched": True,
+        "contradictions": [],
+    }]
 
-    if confidence == Confidence.REJECT:
-        story.verification_status = VerificationStatus.UNVERIFIED
-        raise StoryRejected(
-            f"No reliable source in cluster for: {story.title}"
+    seen_domains = {domain}
+    supporting_domains: set[str] = set()
+    material_conflicts: list[str] = []
+
+    for source in story.corroborating_sources or []:
+        other_tier = int(source.get("tier", SourceTier.TIER4))
+        other_domain = canonical_domain(source.get("url") or source.get("domain", ""))
+        reliable = other_tier <= int(SourceTier.TIER3)
+        comparison = compare_reports(
+            story.title,
+            primary_text,
+            source.get("title", ""),
+            source.get("article_text") or source.get("summary", ""),
         )
 
-    if confidence in (Confidence.HIGH, Confidence.GOOD):
+        independent = (
+            reliable
+            and bool(other_domain)
+            and other_domain not in seen_domains
+            and not comparison.syndicated_copy
+        )
+        if other_domain:
+            seen_domains.add(other_domain)
+
+        if independent and comparison.matched:
+            supporting_domains.add(other_domain)
+        if independent and comparison.contradictions:
+            material_conflicts.extend(
+                f"{source.get('name', other_domain)}: {item}"
+                for item in comparison.contradictions
+            )
+
+        evidence.append({
+            "name": source.get("name", "Unknown"),
+            "url": source.get("url", ""),
+            "domain": other_domain,
+            "tier": other_tier,
+            "role": "corroborating",
+            "independent": independent,
+            "syndicated_copy": comparison.syndicated_copy,
+            "claim_agreement": comparison.agreement,
+            "matched": comparison.matched,
+            "contradictions": comparison.contradictions,
+        })
+
+    story.verification_evidence = evidence
+    independent_count = 1 + len(supporting_domains)
+
+    if material_conflicts:
+        story.verification_status = VerificationStatus.SPECULATIVE
+        story.verification_score = 20.0
+        story.verification_reason = "Material conflict across independent sources: " + "; ".join(material_conflicts[:3])
+        raise StoryRejected(story.verification_reason)
+
+    if independent_count >= MIN_INDEPENDENT_SOURCES:
+        matched_scores = [
+            float(item["claim_agreement"])
+            for item in evidence[1:]
+            if item["independent"] and item["matched"]
+        ]
+        avg_agreement = sum(matched_scores) / max(len(matched_scores), 1)
         story.verification_status = VerificationStatus.VERIFIED
+        story.verification_score = round(
+            min(100.0, 65.0 + 15.0 * len(supporting_domains) + 10.0 * avg_agreement),
+            1,
+        )
+        story.verification_reason = (
+            f"Confirmed by {independent_count} independent reliable domains; "
+            f"average claim agreement {avg_agreement:.0%}."
+        )
         logger.info(
-            "✅ VERIFIED [%s] %d source(s): %s",
-            confidence, corr_count + 1, story.title[:70],
+            "VERIFIED [%d independent sources | %.0f/100]: %s",
+            independent_count,
+            story.verification_score,
+            story.title[:70],
         )
-    else:
-        # LOW confidence — allow through but flag as UNVERIFIED
-        # Editorial scorer will cap these at 55 (below PUBLISH floor)
-        story.verification_status = VerificationStatus.UNVERIFIED
-        logger.warning(
-            "⚠️  UNVERIFIED [LOW confidence | T%s]: %s",
-            source_tier, story.title[:70],
-        )
+        return story
 
+    story.verification_status = VerificationStatus.UNVERIFIED
+    base_score = {1: 55.0, 2: 45.0, 3: 35.0}.get(source_tier, 20.0)
+    story.verification_score = base_score
+    story.verification_reason = (
+        f"Provisional: {story.source_name} is currently the only independent reliable source. "
+        "Keep for review and re-check; do not auto-publish."
+    )
+    logger.warning("PROVISIONAL [%.0f/100]: %s", story.verification_score, story.title[:70])
     return story
 
 
-# ---------------------------------------------------------------------------
-# Legacy shim — set_rss_pool kept for backwards compat (no-op now)
-# ---------------------------------------------------------------------------
+def _enrich_from_source_pages(story: Story) -> None:
+    """Read the primary page and up to two corroborators for deeper fact comparison."""
+    primary = fetch_article(story.source_url)
+    if primary.text:
+        story.article_text = primary.text
+    elif primary.description and len(primary.description) > len(story.raw_summary or ""):
+        story.article_text = primary.description
+    if primary.image_url:
+        story.article_image_url = primary.image_url
+
+    fetched = 0
+    for source in story.corroborating_sources or []:
+        if fetched >= MAX_DEEP_CORROBORATORS:
+            break
+        if int(source.get("tier", SourceTier.TIER4)) > int(SourceTier.TIER3):
+            continue
+        article = fetch_article(source.get("url", ""))
+        fetched += 1
+        if article.text:
+            source["article_text"] = article.text
+        elif article.description and len(article.description) > len(source.get("summary", "")):
+            source["article_text"] = article.description
+
 
 def set_rss_pool(stories: list[Story]) -> None:
-    """
-    No-op shim. RSS pool corroboration is now handled by the clusterer.
-    Kept to avoid import errors in agent.py during transition.
-    """
-    pass
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _domain(url: str) -> str:
-    """Extract the root domain from a URL (e.g. 'bbc.com')."""
-    try:
-        hostname = urlparse(url).hostname or ""
-        return hostname.removeprefix("www.")
-    except Exception:
-        return url
+    """Compatibility shim; clustering already carries corroborating reports."""
+    return None

@@ -9,6 +9,7 @@ env/
 # Drafts and runtime data
 drafts/
 seen_stories.json
+.runtime-backups/
 
 # Python cache
 __pycache__/

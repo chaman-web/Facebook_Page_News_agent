@@ -19,7 +19,7 @@ Publishing philosophy:
      TTL: 6 hours. After that, downgrades to SCHEDULE.
 
   📅 SCHEDULE      score 60–74  (Tier 1: 50–59)
-     Holds for the next scheduled window (07:30 / 12:30 / 19:30).
+     Holds for the next scheduled window (00:00 / 13:00 / 18:00 local).
      Only the highest-scoring SCHEDULE story publishes per window slot.
      TTL: 12 hours.
 
@@ -47,7 +47,7 @@ Features:
   #4  — Audit log                    (posting_decisions.jsonl — every decision recorded)
   #5  — PUBLISH_NOW token bucket     (min 10-min gap between consecutive breaking posts)
   #6  — Slot reservation             (only top-scoring SCHEDULE story takes each window slot)
-  #7  — Dead hours suppression       (midnight–6 AM: only PUBLISH_NOW passes)
+  #7  — Dead hours suppression       (PUBLISH_NOW plus configured midnight window)
   #8  — Per-tier daily slot caps     (prevents category flooding)
   #9  — Audience fatigue             (no 3+ consecutive same-tier posts)
   #10 — Category diversity premium   (same-category repeat needs extra score)
@@ -65,19 +65,20 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from models import Story
+import config
+from models import Story, VerificationStatus
 from pipeline.editorial_scorer import CATEGORY_TIERS
 
 logger = logging.getLogger(__name__)
 
-QUEUE_FILE   = Path("posting_queue.json")
-AUDIT_FILE   = Path("posting_decisions.jsonl")
+QUEUE_FILE   = config.POSTING_QUEUE_PATH
+AUDIT_FILE   = config.POSTING_DECISIONS_PATH
 
 # ---------------------------------------------------------------------------
-# Scheduled posting windows (local time HH:MM) — must match scheduler.py
+# Scheduled posting windows (local time HH:MM) — must match setup_scheduler.ps1
 # ---------------------------------------------------------------------------
 
-SCHEDULED_WINDOWS = ["08:00", "13:00", "19:00"]  # UTC — peak global engagement windows
+SCHEDULED_WINDOWS = config.PUBLISH_WINDOWS_LOCAL
 
 # How many minutes before/after a window is "close enough" to count as in-window
 WINDOW_TOLERANCE_MINUTES = 15
@@ -226,12 +227,15 @@ class QueueEntry:
     category_tier:  int           = 2
     route:          str           = Route.SCHEDULE.value
     published_at:   Optional[str] = None
-    status:         str           = "QUEUED"   # QUEUED | PUBLISHED | SKIPPED | EXPIRED
+    status:         str           = "QUEUED"   # QUEUED | REVIEW_REQUIRED | PUBLISHED | SKIPPED | EXPIRED
     downgraded_from: Optional[str] = None      # original lane before TTL downgrade
     image_path:     Optional[str] = None       # pre-rendered image card path (set before queue)
     post_content:   Optional[str] = None       # pre-generated Facebook post copy
     card_headline:  Optional[str] = None       # AI-generated punchy card headline
     hashtags:       Optional[list] = None      # pre-generated hashtags
+    verification_status: str       = VerificationStatus.UNVERIFIED.value
+    verification_score: float      = 0.0
+    verification_reason: str       = ""
 
     @property
     def route_enum(self) -> Route:
@@ -307,11 +311,25 @@ class PostingQueue:
             post_content  = post_content,
             card_headline = card_headline,
             hashtags      = hashtags,
+            verification_status = story.verification_status.value,
+            verification_score  = float(story.verification_score or 0.0),
+            verification_reason = story.verification_reason or "",
+            status = (
+                "QUEUED"
+                if story.verification_status == VerificationStatus.VERIFIED
+                else "REVIEW_REQUIRED"
+            ),
         )
         self._entries.append(entry)
         self._save()
-        self._audit(story.title, score, tier_num, lane, "QUEUED", f"Routed to {lane.value}")
-        logger.debug("%s [%.1f T%d]: %s", lane.label, score, tier_num, story.title[:55])
+        action = "QUEUED" if entry.status == "QUEUED" else "REVIEW_REQUIRED"
+        detail = (
+            f"Routed to {lane.value}"
+            if entry.status == "QUEUED"
+            else story.verification_reason or "Independent verification required"
+        )
+        self._audit(story.title, score, tier_num, lane, action, detail)
+        logger.debug("%s [%s %.1f T%d]: %s", lane.label, action, score, tier_num, story.title[:55])
 
     def deserves_publishing(
         self,
@@ -351,8 +369,10 @@ class PostingQueue:
         # Re-read lane after possible downgrade
         lane = entry.route_enum
 
-        # 3. Dead hours — only PUBLISH_NOW passes
-        if self.is_dead_hours() and lane != Route.PUBLISH_NOW:
+        # 3. Dead hours — PUBLISH_NOW passes, as does the configured midnight window
+        in_scheduled_window, _ = self._in_scheduled_window(now)
+        scheduled_window_exception = lane == Route.SCHEDULE and in_scheduled_window
+        if self.is_dead_hours() and lane != Route.PUBLISH_NOW and not scheduled_window_exception:
             return False, (
                 f"Dead hours ({DEAD_HOURS_START:02d}:00–{DEAD_HOURS_END:02d}:00) — "
                 f"only 🚨 PUBLISH_NOW passes (need {DEAD_HOURS_MIN_SCORE:.0f}, have {score:.0f})"
@@ -471,8 +491,17 @@ class PostingQueue:
         for entry in self._entries:
             if entry.status != "QUEUED":
                 continue
-            result = self._check_ttl(entry, now)
-            if result is not None:
+            entry_changed = False
+            # A very old PUBLISH_NOW entry may need more than one transition
+            # (PUBLISH_NOW → NEXT_SLOT → SCHEDULE → EXPIRED) in a single run.
+            while entry.status == "QUEUED":
+                before = (entry.status, entry.route, entry.downgraded_from, entry.is_breaking)
+                self._check_ttl(entry, now)
+                after = (entry.status, entry.route, entry.downgraded_from, entry.is_breaking)
+                if after == before:
+                    break
+                entry_changed = True
+            if entry_changed:
                 changed += 1
         if changed:
             self._save()
@@ -494,6 +523,16 @@ class PostingQueue:
                     entry.route_enum, "SKIPPED", reason)
         if reason:
             logger.debug("Skipped (%s): %s", reason, entry.title[:50])
+        self._save()
+
+    def mark_review_required(self, entry: QueueEntry, reason: str = "") -> None:
+        """Remove an unverified legacy entry from automatic publishing."""
+        entry.status = "REVIEW_REQUIRED"
+        entry.verification_reason = reason or entry.verification_reason
+        self._audit(
+            entry.title, entry.score, entry.category_tier,
+            entry.route_enum, "REVIEW_REQUIRED", entry.verification_reason,
+        )
         self._save()
 
     def daily_published_count(self) -> int:
@@ -727,7 +766,7 @@ class PostingQueue:
         compare: list[str] = [e.title for e in self._entries
                                if e.status in ("QUEUED", "PUBLISHED")]
         try:
-            pf = _Path("published_titles.json")
+            pf = _Path(config.PUBLISHED_TITLES_PATH)
             if pf.exists():
                 compare += _json.loads(pf.read_text(encoding="utf-8"))
         except Exception:
@@ -935,6 +974,12 @@ class PostingQueue:
                 e.setdefault("post_content",     None)
                 e.setdefault("card_headline",    None)
                 e.setdefault("hashtags",         None)
+                e.setdefault("verification_status", VerificationStatus.UNVERIFIED.value)
+                e.setdefault("verification_score",  0.0)
+                e.setdefault(
+                    "verification_reason",
+                    "Legacy queue entry has no independent-source verification evidence.",
+                )
                 self._entries.append(QueueEntry(**e))
         except Exception as exc:
             logger.warning("Could not load posting queue (%s) — starting fresh.", exc)

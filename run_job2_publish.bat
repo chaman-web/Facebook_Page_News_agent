@@ -1,3 +1,5 @@
 @echo off
-subst P: C:\Users\akmal\OneDrive\Desktop\FACEBO~1 >nul 2>&1
-C:\Python312\python.exe P:\agent.py --publish >> P:\logs\job2_publish.log 2>&1
+set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
+if not exist "%PROJECT_DIR%logs" mkdir "%PROJECT_DIR%logs"
+C:\Python312\python.exe "%PROJECT_DIR%agent.py" --publish >> "%PROJECT_DIR%logs\job2_publish.log" 2>&1

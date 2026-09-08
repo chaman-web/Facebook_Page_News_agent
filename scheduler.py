@@ -7,10 +7,10 @@ Publishing philosophy:
   - Busy news days: up to 10 posts when genuinely important stories exist.
   - Breaking news is never delayed by schedule intervals.
 
-Peak posting windows (local time):
-  07:30 — Morning scroll
-  12:30 — Lunch break
-  19:30 — Evening
+Publishing windows (local time):
+  00:00 — Global evening window
+  13:00 — Lunch window
+  18:00 — Evening window
 
 At each window, publishes 1 story per category across all 14 categories.
 The deduplicator and quality gate filter this down to the best stories.
@@ -26,7 +26,7 @@ Usage:
     python scheduler.py --no-image    # text only
     python scheduler.py --count 2     # 2 posts per category per window
     python scheduler.py --dry-run     # preview without publishing
-    python scheduler.py --times 07:30 12:30 19:30   # custom windows
+    python scheduler.py --times 00:00 13:00 18:00   # custom windows
 
 Stop with Ctrl+C.
 """
@@ -45,6 +45,8 @@ from pathlib import Path
 
 import schedule
 
+import config
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
@@ -52,8 +54,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DEFAULT_PEAK_TIMES = ["07:30", "12:30", "19:30"]
-RUN_LOG_FILE       = Path("run_log.jsonl")
+DEFAULT_PEAK_TIMES = config.PUBLISH_WINDOWS_LOCAL
+RUN_LOG_FILE       = config.RUN_LOG_PATH
 
 # ---------------------------------------------------------------------------
 # Concurrency guard
@@ -212,7 +214,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
         window_label, now_str, count,
     )
 
-    cmd = [sys.executable, "agent.py", "--all-categories", f"--count={count}"]
+    cmd = [sys.executable, str(config.PROJECT_ROOT / "agent.py"), "--all-categories", f"--count={count}"]
     if dry_run:
         cmd.append("--dry-run")
     else:
@@ -231,6 +233,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
         with _active_process_lock:
             _active_process = subprocess.Popen(
                 cmd,
+                cwd=config.PROJECT_ROOT,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,

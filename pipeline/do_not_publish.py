@@ -78,7 +78,7 @@ class DNPVerdict:
 _RECENT_PUBLISHED_TITLES: list[str] = []
 _MAX_RECENT_TITLES = 100
 _SIMILAR_TITLE_THRESHOLD = 0.72   # 72% similarity = substantially same story
-_PUBLISHED_TITLES_FILE = Path("published_titles.json")
+_PUBLISHED_TITLES_FILE = config.PUBLISHED_TITLES_PATH
 
 
 def _load_published_titles() -> None:

@@ -1,5 +1,6 @@
+$ErrorActionPreference = "Stop"
+
 $projectDir = "C:\Users\akmal\OneDrive\Desktop\facebook news agent"
-$python     = "$projectDir\.venv\Scripts\python.exe"
 $logsDir    = "$projectDir\logs"
 
 # Create logs folder if not exists
@@ -7,8 +8,7 @@ if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir }
 
 # --- Job 1: Fetch & Build — every 3 hours (PKT times) ---
 $action1 = New-ScheduledTaskAction `
-    -Execute $python `
-    -Argument "agent.py --fetch --image" `
+    -Execute (Join-Path $projectDir "run_job1_fetch.bat") `
     -WorkingDirectory $projectDir
 
 $trigger1 = @(
@@ -25,7 +25,8 @@ $trigger1 = @(
 $settings1 = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
     -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable
+    -RunOnlyIfNetworkAvailable `
+    -MultipleInstances IgnoreNew
 
 Register-ScheduledTask `
     -TaskName "GlobalPulseNews_Job1_Fetch" `
@@ -39,8 +40,7 @@ Write-Host "OK Job 1 registered - every 3 hours"
 
 # --- Job 2: Publish — 13:00, 18:00, 00:00 PKT (= 08:00, 13:00, 19:00 UTC) ---
 $action2 = New-ScheduledTaskAction `
-    -Execute $python `
-    -Argument "agent.py --publish" `
+    -Execute (Join-Path $projectDir "run_job2_publish.bat") `
     -WorkingDirectory $projectDir
 
 $trigger2 = @(
@@ -52,7 +52,8 @@ $trigger2 = @(
 $settings2 = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
     -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable
+    -RunOnlyIfNetworkAvailable `
+    -MultipleInstances IgnoreNew
 
 Register-ScheduledTask `
     -TaskName "GlobalPulseNews_Job2_Publish" `

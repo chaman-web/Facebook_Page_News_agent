@@ -55,6 +55,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import sys
 import time
@@ -93,6 +94,19 @@ logger = logging.getLogger(__name__)
 
 # Seconds to wait between Facebook posts (rate limit protection)
 POST_SLEEP_SECONDS = 60
+
+
+def _select_verified_and_provisional(items: list, per_lane: int) -> list:
+    """Keep publish candidates and powerful review candidates independently."""
+    verified = [
+        item for item in items
+        if item[1].verification_status == VerificationStatus.VERIFIED
+    ]
+    provisional = [
+        item for item in items
+        if item[1].verification_status != VerificationStatus.VERIFIED
+    ]
+    return verified[:per_lane] + provisional[:per_lane]
 
 
 # ---------------------------------------------------------------------------
@@ -204,17 +218,25 @@ def fetch_and_build(
     # STAGE 3 — VERIFY SOURCES
     # ==========================================================================
     logger.info("── STAGE 3: Verify Sources ─────────────────────")
-    verified_stories = []
+    verification_candidates = []
     rejected_count = 0
     for story in fresh_stories:
         try:
             story = verify_story(story)
-            verified_stories.append(story)
+            verification_candidates.append(story)
         except StoryRejected as exc:
             logger.debug("Rejected: %s", exc.reason)
             rejected_count += 1
-    logger.info("%d stories passed verification (%d rejected).", len(verified_stories), rejected_count)
-    if not verified_stories:
+    verified_count = sum(
+        1 for story in verification_candidates
+        if story.verification_status == VerificationStatus.VERIFIED
+    )
+    provisional_count = len(verification_candidates) - verified_count
+    logger.info(
+        "%d stories passed source safety: %d verified | %d provisional | %d rejected.",
+        len(verification_candidates), verified_count, provisional_count, rejected_count,
+    )
+    if not verification_candidates:
         logger.warning("No stories passed verification.")
         return 0
 
@@ -222,10 +244,18 @@ def fetch_and_build(
     # STAGE 4 — EDITORIAL SCORING
     # ==========================================================================
     logger.info("── STAGE 4: Editorial Scoring ──────────────────")
-    scored = score_and_filter(verified_stories, allow_hold=False)
+    # A verified HOLD-tier story must remain available for selection even when
+    # a higher-scoring provisional story exists. Verification and editorial
+    # strength are separate lanes; otherwise provisional breaking content can
+    # crowd the only safe publish candidate out of the build stage.
+    scored = score_and_filter(
+        verification_candidates,
+        allow_hold=False,
+        preserve_verified_hold=True,
+    )
     if not scored:
         logger.info("No strong stories found — allowing HOLD-tier fillers.")
-        scored = score_and_filter(verified_stories, allow_hold=True)
+        scored = score_and_filter(verification_candidates, allow_hold=True)
     if not scored:
         logger.warning("All stories scored below 60. Nothing to queue.")
         return 0
@@ -242,22 +272,28 @@ def fetch_and_build(
     # STAGE 5 — STORY SELECTION
     # ==========================================================================
     logger.info("── STAGE 5: Story Selection ────────────────────")
+
     if all_categories:
         from collections import defaultdict
         by_cat: dict[str, list] = defaultdict(list)
         for escore, story in scored:
             cat = getattr(story, "category", "breaking")
-            # Always include PUBLISH-tier; cap SCHEDULE/HOLD at count per category
-            if escore.tier == EditorialTier.PUBLISH:
-                by_cat[cat].append((escore, story))
-            elif len(by_cat[cat]) < count:
-                by_cat[cat].append((escore, story))
-        selected_scored = [item for items in by_cat.values() for item in items]
+            by_cat[cat].append((escore, story))
+        selected_scored = [
+            item
+            for items in by_cat.values()
+            for item in _select_verified_and_provisional(items, count)
+        ]
     else:
-        selected_scored = scored[:count]
+        selected_scored = _select_verified_and_provisional(scored, count)
+
+    selected_verified = sum(
+        1 for _, story in selected_scored
+        if story.verification_status == VerificationStatus.VERIFIED
+    )
     logger.info(
-        "Selected %d stories (tiers: %s).",
-        len(selected_scored),
+        "Selected %d stories: %d verified publish candidate(s), %d provisional review candidate(s) (tiers: %s).",
+        len(selected_scored), selected_verified, len(selected_scored) - selected_verified,
         ", ".join(f"{s.tier.value}" for s, _ in selected_scored),
     )
 
@@ -266,9 +302,29 @@ def fetch_and_build(
     # ==========================================================================
     logger.info("── STAGE 6: Build Posts (Generate → Validate → Image → Quality) ──")
     ready_posts: list[tuple] = []
+    review_drafts = 0
 
     for escore, story in selected_scored:
+        if dry_run and story.verification_status != VerificationStatus.VERIFIED:
+            review_drafts += 1
+            logger.info(
+                "📝 [DRY RUN] Provisional review candidate [%.1f]: %s | %s",
+                escore.total, story.title[:60], story.verification_reason,
+            )
+            continue
+
         if not dry_run:
+            # Deep verification is intentionally delayed until after ranking so
+            # only selected stories trigger full article downloads.
+            try:
+                story = verify_story(story, deep=True)
+            except StoryRejected as exc:
+                logger.warning("Deep verification rejected '%s': %s", story.title[:50], exc.reason)
+                story.draft_status = DraftStatus.REJECTED
+                story.rejection_reason = exc.reason
+                save_draft(story)
+                continue
+
             # 6a — Generate
             try:
                 story = generate_post(story)
@@ -287,6 +343,21 @@ def fetch_and_build(
                 story.draft_status = DraftStatus.REJECTED
                 story.rejection_reason = str(exc)
                 save_draft(story)
+                continue
+
+            # Preserve powerful single-source stories as reviewable drafts, but
+            # never place them in the automatic Facebook publishing queue.
+            if story.verification_status != VerificationStatus.VERIFIED:
+                story.draft_status = DraftStatus.DRAFT
+                story.rejection_reason = None
+                save_draft(story)
+                review_drafts += 1
+                logger.info(
+                    "📝 Provisional story saved for review [editorial %.1f | verification %.1f]: %s",
+                    escore.total,
+                    story.verification_score,
+                    story.title[:60],
+                )
                 continue
 
         # 6c — Image
@@ -343,13 +414,19 @@ def fetch_and_build(
                 continue
 
         if not dry_run:
-            mark_seen(story, permanent=True)
+            # Persist the evidence-rich verified draft before it enters the
+            # queue. Permanent duplicate history is recorded only after the
+            # Facebook API confirms publication.
+            save_draft(story)
 
         ready_posts.append((escore, story, image_path))
         logger.info("✅ Ready: [%.1f — %s] %s", escore.total, escore.tier.value, story.title[:60])
 
     if not ready_posts:
-        logger.warning("No stories passed all build stages. Nothing to queue.")
+        if review_drafts:
+            logger.info("No auto-publishable stories; %d provisional draft(s) saved for review.", review_drafts)
+        else:
+            logger.warning("No stories passed all build stages. Nothing to queue.")
         return 0
 
     logger.info("%d/%d stories fully built and ready.", len(ready_posts), len(selected_scored))
@@ -385,9 +462,14 @@ def fetch_and_build(
         added += 1
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    logger.info("Fetch & Build done. %d posts added to queue.", added)
+    logger.info(
+        "Fetch & Build done. %d verified posts added to queue; %d provisional drafts saved.",
+        added, review_drafts,
+    )
     logger.info("Queue: %s", queue.summary())
+
     logger.info("Run  python agent.py --publish  to fire them.")
+
     return 0
 
 
@@ -453,12 +535,21 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.warning("Hard safety ceiling reached mid-run. Stopping.")
             break
 
-        # --force-now: promote SCHEDULE → NEXT_SLOT
-        if force_now and entry.route == Route.SCHEDULE.value:
-            logger.info("⚡ --force-now: promoting '%s' from SCHEDULE → NEXT_SLOT", entry.title[:50])
-            entry.route = Route.NEXT_SLOT.value
+        # Defense in depth: legacy queue entries and provisional stories must
+        # never reach the Facebook publisher without the new evidence gate.
+        if entry.verification_status != VerificationStatus.VERIFIED.value:
+            reason = (
+                entry.verification_reason
+                or "Independent-source verification is required before publishing."
+            )
+            logger.warning("📝 Review required — not publishing: %s | %s", entry.title[:60], reason)
+            queue.mark_review_required(entry, reason)
+            continue
 
-        ok, reason = queue.deserves_publishing(entry, last_published_at, last_breaking_at)
+        if force_now:
+            ok, reason = True, "Explicit --force-now override"
+        else:
+            ok, reason = queue.deserves_publishing(entry, last_published_at, last_breaking_at)
 
         route_icon = {
             "PUBLISH_NOW": "🔴 BREAKING",
@@ -487,6 +578,9 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             hashtags       = entry.hashtags or [],
             category       = entry.category,
             draft_status   = DraftStatus.READY_FOR_REVIEW,
+            verification_status = VerificationStatus.VERIFIED,
+            verification_score  = entry.verification_score,
+            verification_reason = entry.verification_reason,
         )
 
         image_path = Path(entry.image_path) if entry.image_path else None
@@ -500,8 +594,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             failed_count += 1
             continue
 
-        # Save draft
-        save_draft(story)
+        # The evidence-rich draft was already saved during the fetch stage.
 
         try:
             if image_path:
@@ -515,6 +608,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
             queue.mark_published(entry)
             record_published_title(entry.title)
+            mark_seen(story, permanent=True)
             last_published_at = datetime.now(timezone.utc)
             if entry.is_breaking:
                 last_breaking_at = last_published_at
@@ -573,23 +667,57 @@ def main(
 
     # --publish only (no --fetch) → just fire the queue
     if publish and not fetch and not dry_run:
-        return publish_from_queue(force_now=force_now, count=count if count > 1 else 0)
+        return publish_from_queue(force_now=force_now, count=count)
 
     # --publish --dry-run (no --fetch) → preview queue without publishing
     if publish and not fetch and dry_run:
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         logger.info("  Global Pulse News — Publish Queue [DRY RUN]")
         logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-        queue    = PostingQueue()
-        queued   = [e for e in queue._entries if e.status == "QUEUED"]
-        day_type = queue._classify_day()
-        logger.info("Queue: %s", queue.summary())
+        queue = copy.deepcopy(PostingQueue())
+        # Preview queue transitions without touching runtime files or audit logs.
+        queue._save = lambda: None
+        queue._audit = lambda *args, **kwargs: None
+        queue.expire_stale()
+        queued = [e for e in queue._entries if e.status == "QUEUED"]
+        queued.sort(key=lambda e: (e.route_enum.priority, -e.score))
+        logger.info("Queue after TTL checks: %s", queue.summary())
         if not queued:
             logger.info("Queue is empty — nothing to publish.")
         else:
-            logger.info("%d posts ready in queue:", len(queued))
-            for i, e in enumerate(queued, 1):
-                logger.info("  %d. [%.1f — %s] %s [%s]", i, e.score, e.route, e.title[:70], e.source_name)
+            publishable = []
+            skipped = []
+            last_published_at = None
+            last_breaking_at = queue.last_breaking_published_at()
+            for entry in queued:
+                if entry.verification_status != VerificationStatus.VERIFIED.value:
+                    skipped.append((
+                        entry,
+                        entry.verification_reason
+                        or "Independent-source verification is required.",
+                    ))
+                    continue
+                ok, reason = queue.deserves_publishing(
+                    entry, last_published_at, last_breaking_at
+                )
+                if not ok:
+                    skipped.append((entry, reason))
+                    continue
+                publishable.append((entry, reason))
+                simulated_at = datetime.now(timezone.utc)
+                entry.status = "PUBLISHED"
+                entry.published_at = simulated_at.isoformat()
+                last_published_at = simulated_at
+                if entry.is_breaking:
+                    last_breaking_at = simulated_at
+
+            logger.info("Would publish %d post(s) if the publish job ran now:", len(publishable))
+            for i, (entry, reason) in enumerate(publishable, 1):
+                logger.info(
+                    "  %d. [%.1f — %s] %s [%s] | %s",
+                    i, entry.score, entry.route, entry.title[:70], entry.source_name, reason,
+                )
+            logger.info("Would leave %d queued due to timing/editorial gates.", len(skipped))
         return 0
 
     # --fetch (with or without --publish) → run the full pipeline
@@ -604,7 +732,7 @@ def main(
         if result != 0 or not publish or dry_run:
             return result
         # --fetch --publish: after building, also publish
-        return publish_from_queue(force_now=force_now, count=count if count > 1 else 0)
+        return publish_from_queue(force_now=force_now, count=count)
 
     # Neither --fetch nor --publish → show help hint
     logger.info("Nothing to do. Use --fetch to fill queue, --publish to fire it.")
@@ -1198,7 +1326,8 @@ Examples:
     parser.add_argument("--publish",        action="store_true",  help="Publish queued posts to Facebook (instant — no fetch).")
     parser.add_argument("--image",          action="store_true",  help="Build image cards during --fetch.")
     parser.add_argument("--dry-run",        action="store_true",  help="Preview --fetch pipeline without writing or queuing.")
-    parser.add_argument("--count",          type=int, default=1,  help="Posts per category per --fetch run (default: 1).")
+    parser.add_argument("--count",          type=int, default=1,
+                        help="Posts per category for --fetch, or maximum posts for --publish (default: 1; use 0 for all eligible).")
     parser.add_argument("--category",       type=str, default="breaking", choices=list(CATEGORIES.keys()),
                         help="Single category to fetch (default: all).")
     parser.add_argument("--all-categories", action="store_true",  help="Fetch all 14 categories.")

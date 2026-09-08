@@ -53,7 +53,7 @@ THRESHOLD_PUBLISH_IF_HIGH = 70   # 70–79 → publish if high-priority story
 THRESHOLD_IMPROVE         = 55   # 55–69 → skip (image needs work)
 # < 55 → REGENERATE (reject entirely)
 
-SCORE_LOG_PATH = Path("score_log.jsonl")
+SCORE_LOG_PATH = config.SCORE_LOG_PATH
 
 
 # ── Result dataclass ──────────────────────────────────────────────────────────

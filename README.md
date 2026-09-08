@@ -1,9 +1,9 @@
 # Facebook News Agent
 
-An automated system that discovers recent worldwide news, verifies it across multiple
-sources, generates an original Facebook post, and saves it as a draft for human review.
-
-**Phase 1** — News discovery → verification → draft generation. Nothing is published automatically.
+An automated system that discovers worldwide news, checks independent-source evidence,
+scores editorial importance, creates a Facebook post and image card, and routes verified
+stories through a scheduled publishing queue. Strong single-source stories are preserved
+as drafts for review and are blocked from automatic publishing.
 
 ---
 
@@ -11,7 +11,9 @@ sources, generates an original Facebook post, and saves it as a draft for human 
 
 - Python 3.11 or newer
 - A [NewsAPI](https://newsapi.org) API key (free tier: 100 requests/day)
-- An [OpenAI](https://platform.openai.com) API key (GPT-4o)
+- Local Ollama with the configured model, or an OpenAI API key
+- Facebook Page credentials when publishing is enabled
+- A Pexels API key when image cards are enabled
 
 ---
 
@@ -39,11 +41,14 @@ cp .env.example .env
 ## Running the agent
 
 ```bash
-# Normal run — fetches news, verifies, generates post, saves draft
-python agent.py
+# Fetch, verify, build posts and image cards, then fill the queue
+python agent.py --fetch --image
 
-# Dry run — runs the full pipeline but writes no files (good for testing)
-python agent.py --dry-run
+# Preview the current publish queue without writing files or posting
+python agent.py --publish --dry-run
+
+# Publish only independently verified entries that pass queue rules
+python agent.py --publish
 ```
 
 ---
@@ -66,6 +71,18 @@ drafts/
 | `DRAFT` | Only 1 source found. Review carefully before publishing. |
 | `REJECTED` | Failed quality or safety checks. Reason is recorded in the file. |
 
+### Verification and scoring
+
+Verification and editorial importance are separate decisions:
+
+- `VERIFIED` requires matching reports from at least two independent Tier 1–3 domains.
+- Reports from the same publisher's subdomains count as one source.
+- Near-identical syndicated copies do not count as independent confirmation.
+- Material conflicts in outcomes or casualty figures reject the story.
+- Selected stories receive a deeper check using public article text when accessible.
+- A powerful single-source story keeps its full editorial score and becomes a `DRAFT`.
+  It cannot enter the automatic Facebook publishing path.
+
 ### JSON structure
 
 ```json
@@ -76,6 +93,9 @@ drafts/
   "published_at": "2026-08-31T12:00:00+00:00",
   "news_summary": "...",
   "verification_status": "VERIFIED",
+  "verification_score": 86,
+  "verification_reason": "Confirmed by 2 independent reliable domains...",
+  "verification_evidence": [{"domain": "bbc.com", "matched": true}],
   "corroborating_sources": [{"name": "Reuters", "url": "..."}],
   "post_content": "...",
   "hashtags": ["#WorldNews", "..."],
@@ -108,8 +128,10 @@ facebook-news-agent/
 ├── pipeline/
 │   ├── selector.py       # Picks the best story candidate
 │   ├── deduplicator.py   # Detects already-processed stories
-│   ├── verifier.py       # Cross-source verification
+│   ├── claim_matcher.py  # Compares core facts and contradictions
+│   ├── verifier.py       # Independent-source evidence gate
 │   └── generator.py      # LLM-based Facebook post generation
+├── news/article_extractor.py # Reads public article text for deep verification
 ├── output/
 │   └── draft_writer.py   # Writes JSON + Markdown draft files
 ├── tests/                # Unit tests
@@ -121,11 +143,8 @@ facebook-news-agent/
 
 ---
 
-## Roadmap
+## Current safety boundary
 
-- **Phase 2** — Better news discovery, multiple categories, story scoring
-- **Phase 3** — Facebook Page publishing via Graph API
-- **Phase 4** — AI image generation for posts
-- **Phase 5** — Short video / Reel generation
-- **Phase 6** — Automatic scheduling
-- **Phase 7** — Facebook analytics and content optimisation
+Source agreement is deterministic and auditable, but it is not a professional fact-checking
+service. Image relevance remains a separate improvement area: current stock or generated
+images are checked for visual quality, not full factual identity matching.

@@ -29,7 +29,7 @@ import config
 logger = logging.getLogger(__name__)
 
 GRAPH_API_URL = "https://graph.facebook.com/v19.0"
-ENV_PATH = Path(".env")
+ENV_PATH = config.ENV_PATH
 
 # Tokens with more than this many seconds remaining are considered valid
 MIN_REMAINING_SECONDS = 60 * 60  # 1 hour

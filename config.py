@@ -7,10 +7,16 @@ Fails fast with a clear error message if required values are missing.
 
 import os
 import sys
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-load_dotenv()
+# Anchor configuration and runtime state to the repository, regardless of the
+# process working directory (Windows Task Scheduler commonly starts in
+# C:\Windows\System32).
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_PATH = PROJECT_ROOT / ".env"
+load_dotenv(ENV_PATH)
 
 
 def _require(key: str) -> str:
@@ -84,9 +90,20 @@ RSS_FALLBACK_FEEDS = [
 NEWS_MAX_AGE_HOURS: int = int(_optional("NEWS_MAX_AGE_HOURS", "48"))
 NEWS_MIN_SOURCES: int = int(_optional("NEWS_MIN_SOURCES", "2"))
 
-# Paths
-SEEN_STORIES_PATH = "seen_stories.json"
-DRAFTS_DIR = "drafts"
+# Runtime paths
+SEEN_STORIES_PATH = PROJECT_ROOT / "seen_stories.json"
+DRAFTS_DIR = PROJECT_ROOT / "drafts"
+POSTING_QUEUE_PATH = PROJECT_ROOT / "posting_queue.json"
+POSTING_DECISIONS_PATH = PROJECT_ROOT / "posting_decisions.jsonl"
+PUBLISHED_TITLES_PATH = PROJECT_ROOT / "published_titles.json"
+SOURCE_HEALTH_PATH = PROJECT_ROOT / "source_health.json"
+SCORE_LOG_PATH = PROJECT_ROOT / "score_log.jsonl"
+RUN_LOG_PATH = PROJECT_ROOT / "run_log.jsonl"
+IMAGES_DIR = PROJECT_ROOT / "images"
+LOGS_DIR = PROJECT_ROOT / "logs"
+
+# Windows Task Scheduler and the queue both interpret these as local times.
+PUBLISH_WINDOWS_LOCAL = ["00:00", "13:00", "18:00"]
 
 # Duplicate detection threshold (0.0 – 1.0)
 DUPLICATE_TITLE_THRESHOLD = 0.92

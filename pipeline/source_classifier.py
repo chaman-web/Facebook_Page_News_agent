@@ -150,6 +150,15 @@ TIER1_DOMAINS: set[str] = {
     "dw.com",
     "rfi.fr",
     "voanews.com",
+    # Primary official evidence sources. An official statement counts as
+    # authoritative evidence for what the organisation said, not as independent
+    # confirmation that every claim in the statement is true.
+    "un.org",
+    "who.int",
+    "europa.eu",
+    "nato.int",
+    "worldbank.org",
+    "imf.org",
 }
 
 TIER1_NAME_FRAGMENTS: set[str] = {
@@ -351,7 +360,7 @@ def classify_source(source_name: str, source_url: str) -> SourceClassification:
     Uses domain first, then falls back to source name matching.
     Unknown sources default to Tier 4.
     """
-    domain = _extract_domain(source_url)
+    domain = canonical_domain(source_url)
     name   = source_name.lower()
 
     tier = _classify_by_domain(domain) or _classify_by_name(name) or SourceTier.TIER4
@@ -400,7 +409,7 @@ def compute_confidence(classifications: list[SourceClassification]) -> str:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _extract_domain(url: str) -> str:
+def canonical_domain(url: str) -> str:
     """Extract root domain from URL, stripping www. prefix."""
     try:
         parsed = urlparse(url if "://" in url else f"https://{url}")
@@ -410,9 +419,20 @@ def _extract_domain(url: str) -> str:
             host = host[4:]
         # Strip port if present
         host = host.split(":")[0]
+        all_known = (
+            TIER5_DOMAINS | TIER1_DOMAINS | TIER2_DOMAINS
+            | TIER3_DOMAINS | TIER4_DOMAINS
+        )
+        for known in sorted(all_known, key=len, reverse=True):
+            if host == known or host.endswith(f".{known}"):
+                return known
         return host
     except Exception:
         return ""
+
+
+# Backwards-compatible private alias used by older imports/tests.
+_extract_domain = canonical_domain
 
 
 def _classify_by_domain(domain: str) -> SourceTier | None:

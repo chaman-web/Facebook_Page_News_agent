@@ -28,10 +28,10 @@ THRESHOLDS (after multiplier, capped at 100):
   60–69  → SCHEDULE / HOLD       → filler only — publish if nothing better available
   < 60   → DO NOT PUBLISH        → rejected outright
 
-VERIFICATION GATE:
-  UNVERIFIED (0 corroborating sources) → score hard-capped at 55
-  → Falls below PUBLISH floor (60), surfaces only as HOLD on LOW_NEWS days
-  → Prevents quizzes, rumours, and opinion pieces from ever publishing normally
+VERIFICATION IS A SEPARATE GATE:
+  This module measures editorial importance only. A high score preserves a
+  powerful single-source story for review, but does not make it eligible for
+  automatic publishing. pipeline.verifier owns that decision.
 """
 
 from __future__ import annotations
@@ -90,25 +90,6 @@ class EditorialScore:
         """PRIORITY and HIGH bypass the minimum posting interval."""
         return self.tier in (EditorialTier.PRIORITY, EditorialTier.HIGH)
 
-
-# ---------------------------------------------------------------------------
-# Source tiers
-# ---------------------------------------------------------------------------
-
-_TIER1_SOURCES = {
-    "bbc", "reuters", "associated press", "ap news", "ap",
-    "new york times", "nytimes", "washington post", "guardian",
-    "bloomberg", "financial times", "ft", "al jazeera", "npr",
-    "abc news", "cbs news", "nbc news", "cnn", "the economist",
-    "sky news", "france 24", "afp",
-}
-
-_TIER2_SOURCES = {
-    "politico", "axios", "the hill", "techcrunch", "wired", "the verge",
-    "ars technica", "nature", "new scientist", "forbes", "cnbc", "fortune",
-    "wall street journal", "wsj", "time", "newsweek", "usa today",
-    "huffpost", "vox", "bbc sport", "espn", "sky sports",
-}
 
 # ---------------------------------------------------------------------------
 # Keyword tables
@@ -367,7 +348,7 @@ def score_story(story: Story) -> EditorialScore:
     news_value         = _score_news_value(text, title)
     breaking_urgency   = _score_breaking_urgency(text, story.corroborating_sources)
     audience_interest  = _score_audience_interest(text, title)
-    source_credibility = _score_source_credibility(story.source_name, story.corroborating_sources)
+    source_credibility = _score_source_credibility(story)
     freshness          = _score_freshness(story.published_at, text)
     visual_potential   = _score_visual_potential(text)
 
@@ -403,25 +384,6 @@ def score_story(story: Story) -> EditorialScore:
 
     total = min(total, 100.0)
 
-    # --- Verification gate ---
-    # UNVERIFIED stories (0 corroborating sources) are capped:
-    #   Tier 1/2 source → cap at 65 (can pass on LOW NEWS DAY, floor=60)
-    #   Tier 3/4 source → cap at 55 (never publishes on normal days)
-    # This prevents quizzes, opinion pieces, and rumours from ever being published
-    # on normal or busy news days, while allowing authoritative single-source
-    # regional reporting (Dawn, NDTV, etc.) to surface on slow news days.
-    from models import VerificationStatus
-    v_status = getattr(story, "verification_status", None)
-    if v_status == VerificationStatus.UNVERIFIED:
-        source_tier = getattr(story, "source_tier", 4)
-        unverified_cap = 65.0 if source_tier <= 2 else 55.0
-        if total > unverified_cap:
-            logger.debug(
-                "🔒 UNVERIFIED cap applied (%.1f → %.1f) [T%d]: %s",
-                total, unverified_cap, source_tier, title[:65]
-            )
-            total = unverified_cap
-
     tier  = _classify_tier(total)
 
     reason = _build_reason(
@@ -429,6 +391,10 @@ def score_story(story: Story) -> EditorialScore:
         source_credibility, freshness, visual_potential,
         multiplier, tier_num, total, tier, overridden=(override == 1),
     )
+    verification = getattr(story, "verification_status", "UNVERIFIED")
+    verification_value = getattr(verification, "value", str(verification))
+    verification_score = float(getattr(story, "verification_score", 0.0) or 0.0)
+    reason += f" | Verification {verification_value} {verification_score:.0f}/100 (separate gate)"
 
     score = EditorialScore(
         story_title          = title,
@@ -453,6 +419,7 @@ def score_story(story: Story) -> EditorialScore:
 def score_and_filter(
     stories: list[Story],
     allow_hold: bool = False,
+    preserve_verified_hold: bool = False,
 ) -> list[tuple[EditorialScore, Story]]:
     """
     Score all stories. Filter out REJECT tier.
@@ -480,6 +447,12 @@ def score_and_filter(
 
     if strong:
         results = strong
+        if preserve_verified_hold:
+            from models import VerificationStatus
+            results += [
+                (score, story) for score, story in fillers
+                if story.verification_status == VerificationStatus.VERIFIED
+            ]
     elif allow_hold and fillers:
         logger.info("No strong stories available — using %d HOLD filler(s).", len(fillers))
         results = fillers
@@ -590,21 +563,35 @@ def _score_audience_interest(text: str, title: str) -> float:
     return min(score, 20.0)
 
 
-def _score_source_credibility(source_name: str, corroborating: list[dict] | None) -> float:
+def _score_source_credibility(story: Story) -> float:
     """
     Source credibility (0–15).
-    Tier-1 = 10, Tier-2 = 6, unknown = 3.
-    +1 per corroborating source, capped at +5.
+    Uses the central source classifier tier instead of a second name list.
+    Tier-1 = 10, Tier-2 = 7, Tier-3 = 5, Tier-4 = 2.
+    +1 per independent reliable corroborating domain, capped at +5.
     """
-    name  = source_name.lower()
-    score = 5.0   # raised baseline — published sources have base credibility
+    from pipeline.source_classifier import SourceTier, canonical_domain, classify_source
 
-    if any(t in name for t in _TIER1_SOURCES):
-        score = 10.0
-    elif any(t in name for t in _TIER2_SOURCES):
-        score = 7.0
+    source_tier = int(getattr(story, "source_tier", SourceTier.TIER4))
+    score = {
+        int(SourceTier.TIER1): 10.0,
+        int(SourceTier.TIER2): 7.0,
+        int(SourceTier.TIER3): 5.0,
+        int(SourceTier.TIER4): 2.0,
+    }.get(source_tier, 0.0)
 
-    score += min(len(corroborating or []), 5)
+    seen = {canonical_domain(story.source_url)}
+    independent = 0
+    for source in story.corroborating_sources or []:
+        tier = source.get("tier")
+        if tier is None:
+            tier = classify_source(source.get("name", ""), source.get("url", "")).tier
+        domain = canonical_domain(source.get("url") or source.get("domain", ""))
+        if int(tier) <= int(SourceTier.TIER3) and domain and domain not in seen:
+            seen.add(domain)
+            independent += 1
+
+    score += min(independent, 5)
     return min(score, 15.0)
 
 

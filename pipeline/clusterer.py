@@ -47,6 +47,7 @@ from pipeline.source_classifier import (
     SourceTier,
     classify_source,
     compute_confidence,
+    canonical_domain,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,6 +159,10 @@ def cluster_stories(stories: list[Story]) -> list[Story]:
                     "name": s.source_name,
                     "url":  s.source_url,
                     "tier": getattr(s, "source_tier", SourceTier.TIER4),
+                    "domain": canonical_domain(s.source_url),
+                    "title": s.title,
+                    "summary": s.raw_summary or "",
+                    "published_at": s.published_at.isoformat() if s.published_at else None,
                 })
         primary.corroborating_sources = corroborating
 
