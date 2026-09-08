@@ -27,14 +27,14 @@ Publishing philosophy:
     MAJOR BREAKING  → publish as they arrive
     BUSY NEWS DAY   → normal interval, higher ceiling
     NORMAL DAY      → standard operation
-    LOW NEWS DAY    → HOLD lane activated, floor drops to 50
+    LOW NEWS DAY    → legacy HOLD entries remain supported
 
   Hard safety ceiling: 15 posts/day (circuit breaker only).
   No minimum. Zero posts on a dead day is valid.
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Features:
-  #1  — Scheduled window awareness   (SCHEDULE lane waits for 07:30/12:30/19:30)
+  #1  — Scheduled window awareness   (uses PUBLISH_WINDOWS_LOCAL from config.py)
   #2  — Per-lane TTL + auto-expiry   (PUBLISH_NOW 2h, NEXT_SLOT 6h, SCHEDULE 12h, HOLD EoD)
   #3  — Re-routing on TTL expiry     (PUBLISH_NOW→NEXT_SLOT, NEXT_SLOT→SCHEDULE on age)
   #4  — Audit log                    (posting_decisions.jsonl — every decision recorded)
@@ -169,15 +169,13 @@ def route_story(score: float, tier: int) -> Route:
     """
     Single point of truth for routing. Called once at queue-entry time.
 
-    Score thresholds:
-        Score       Tier 1          Tier 2/3
-        ─────────────────────────────────────
-        ≥ 88        PUBLISH_NOW     PUBLISH_NOW
-        85–87       PUBLISH_NOW     NEXT_SLOT
-        75–84       NEXT_SLOT       NEXT_SLOT
-        60–74       NEXT_SLOT       SCHEDULE
-        50–59       SCHEDULE        HOLD
-        < 50        REJECT          REJECT
+    New-entry score thresholds:
+        ≥ 80    PUBLISH_NOW
+        60–79   SCHEDULE
+        < 60    REJECT
+
+    ``tier`` is retained for API compatibility. Existing NEXT_SLOT and HOLD
+    entries remain supported by the queue's expiry and migration paths.
     """
     # Simple editorial routing: high value goes now, moderate waits for the
     # next scheduled window, low value never enters the queue.

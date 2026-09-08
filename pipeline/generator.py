@@ -45,13 +45,6 @@ def generate_post(story: Story) -> Story:
     """
     Generate an original Facebook post from the verified story facts.
     Sets story.post_content and story.hashtags.
-    Raises GenerationError on failure.
-    Retries up to MAX_GENERATION_RETRIES times if hashtags are missing.
-    """
-def generate_post(story: Story) -> Story:
-    """
-    Generate an original Facebook post from the verified story facts.
-    Sets story.post_content and story.hashtags.
     Raises GenerationError only if Ollama returns truly nothing (completely empty).
 
     Philosophy — fix it, don't reject it:
