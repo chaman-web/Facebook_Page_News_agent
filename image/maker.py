@@ -23,6 +23,7 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 import config
 from models import Story
+from pipeline.story_topic import card_topic
 
 logger = logging.getLogger(__name__)
 
@@ -743,7 +744,7 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
 # ── Composition ───────────────────────────────────────────────────────────────
 
 def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -> Image.Image:
-    category = (getattr(story, "category", "") or "").lower().strip()
+    category = card_topic(story)
     if category not in CATEGORY_LABELS:
         category = "news"
     accent = BRAND_ACCENT
