@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -819,13 +820,15 @@ def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -
     draw.rectangle([(ML, rule_y), (ML + 120, rule_y + 4)], fill=accent)
 
     context = _context_line(story)
-    context_y = IMAGE_HEIGHT - 290
+    context_y = IMAGE_HEIGHT - 315
     if context:
+        kicker_font = _font("Montserrat-ExtraBold.ttf", 21)
         ctx_font = _font("Montserrat-SemiBold.ttf", CONTEXT_SIZE)
-        while draw.textlength(context, font=ctx_font) > max_w and len(context) > 10:
-            context = context[:context.rfind(" ")] + "..."
-        draw.rectangle([(ML, context_y + 2), (ML + 4, context_y + CONTEXT_SIZE - 2)], fill=accent)
-        draw.text((ML + 16, context_y), context, font=ctx_font, fill=OFF_WHITE)
+        draw.rectangle([(ML, context_y), (ML + 178, context_y + 34)], fill=RED_DARK)
+        draw.text((ML + 14, context_y + 5), "WHY IT MATTERS", font=kicker_font, fill=WHITE)
+        wrapped = _wrap_text(draw, context, ctx_font, max_w).splitlines()[:2]
+        draw.multiline_text((ML, context_y + 48), "\n".join(wrapped),
+                            font=ctx_font, fill=WHITE, spacing=8)
 
     footer_mid = IMAGE_HEIGHT - 95
     logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
@@ -844,29 +847,25 @@ def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -
         draw.rectangle([(div_x - offset, div_y1), (div_x + offset, div_y2)],
                        fill=(*accent[:3], alpha))
 
-    sources = [story.source_name]
+    sources = [_source_display_name(story.source_name, story.source_url)]
     if story.corroborating_sources:
-        extra = story.corroborating_sources[0].get("name", "")
-        if extra and extra != story.source_name:
+        corroborator = story.corroborating_sources[0]
+        extra = _source_display_name(corroborator.get("name", ""), corroborator.get("url", ""))
+        if extra and extra not in sources:
             sources.append(extra)
 
     src_x = div_x + 24
-    pri_font = _font("Montserrat-ExtraBold.ttf", SOURCE_SIZE + 4)
-    sec_font = _font("Montserrat-Medium.ttf", SOURCE_SIZE)
-    pri_h = SOURCE_SIZE + 4
-    total_h = pri_h + (8 + SOURCE_SIZE if len(sources) > 1 else 0)
-    sy = footer_mid - total_h // 2
-    pri_name = sources[0].upper()
-    src_max_w = IMAGE_WIDTH - MR - src_x - 20
-    while draw.textlength(pri_name, font=pri_font) > src_max_w and len(pri_name) > 4:
-        pri_name = pri_name[:-2].rstrip() + "."
-    draw.text((src_x, sy), pri_name, font=pri_font, fill=WHITE)
-    if len(sources) > 1:
-        draw.text((src_x, sy + pri_h + 8), sources[1].upper(), font=sec_font, fill=OFF_WHITE)
-
+    source_label_font = _font("Montserrat-Bold.ttf", 19)
+    source_font = _font("Montserrat-ExtraBold.ttf", SOURCE_SIZE + 3)
     date_str = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
     date_font = _font("Montserrat-Bold.ttf", DATE_SIZE + 4)
     date_w = int(draw.textlength(date_str, font=date_font))
+    source_text = "  •  ".join(sources[:2]).upper()
+    src_max_w = IMAGE_WIDTH - MR - src_x - date_w - 52
+    while draw.textlength(source_text, font=source_font) > src_max_w and len(source_text) > 20:
+        source_text = source_text[:-4].rstrip() + "..."
+    draw.text((src_x, footer_mid - 34), "VERIFIED SOURCES", font=source_label_font, fill=accent)
+    draw.text((src_x, footer_mid - 5), source_text, font=source_font, fill=WHITE)
     draw.text((IMAGE_WIDTH - MR - date_w, footer_mid - (DATE_SIZE + 4) // 2),
               date_str, font=date_font, fill=OFF_WHITE)
     return canvas
@@ -925,14 +924,59 @@ def _strip_html(text: str) -> str:
 
 
 def _context_line(story: Story) -> str:
-    summary = _strip_html(story.raw_summary or "")
-    if not summary:
+    """Choose a grounded consequence or key detail that does not repeat the title."""
+    evidence = [story.raw_summary or "", story.article_text or ""]
+    if story.post_content:
+        evidence.insert(0, story.post_content)
+    evidence.extend(source.get("summary", "") for source in story.corroborating_sources or [])
+
+    title_terms = set(re.findall(r"[a-z0-9]+", story.title.lower()))
+    cues = {
+        "ban", "blocked", "could", "expected", "first", "impact", "marks",
+        "millions", "new", "response", "risk", "shift", "trade", "would",
+    }
+    candidates: list[tuple[float, str]] = []
+    for block in evidence:
+        clean = _strip_html(block)
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", clean):
+            sentence = re.sub(r"^[^A-Za-z0-9]+", "", sentence).strip()
+            words = sentence.split()
+            if len(words) < 6 or sentence.endswith("?") or sentence.lower().startswith("sources:"):
+                continue
+            terms = set(re.findall(r"[a-z0-9]+", sentence.lower()))
+            overlap = len(terms & title_terms) / max(1, len(title_terms))
+            score = sum(2 for cue in cues if cue in terms)
+            score += 3 if re.search(r"\b\d[\d,.]*%?\b|[$£€]", sentence) else 0
+            score += min(len(words), 18) / 18
+            score -= overlap * 8
+            candidates.append((score, sentence))
+
+    if not candidates:
         return ""
-    first = summary.split(".")[0].strip()
-    words = first.split()
-    if len(words) < 4:
-        return ""
-    return " ".join(words[:20]) + ("..." if len(words) > 20 else "")
+    chosen = max(candidates, key=lambda item: item[0])[1]
+    words = chosen.split()
+    limit = 18
+    return " ".join(words[:limit]) + ("..." if len(words) > limit else "")
+
+
+def _source_display_name(name: str, url: str) -> str:
+    """Return a clean publisher name suitable for compact card attribution."""
+    domain = urlparse(url or "").netloc.lower().removeprefix("www.")
+    known = {
+        "nytimes.com": "New York Times",
+        "washingtonpost.com": "Washington Post",
+        "bbc.com": "BBC News",
+        "bbc.co.uk": "BBC News",
+        "reuters.com": "Reuters",
+        "apnews.com": "Associated Press",
+        "aljazeera.com": "Al Jazeera",
+        "theguardian.com": "The Guardian",
+    }
+    for suffix, display in known.items():
+        if domain == suffix or domain.endswith("." + suffix):
+            return display
+    clean = re.split(r"\s*[>|/]\s*", name or "")[0].strip()
+    return clean or domain.split(".")[0].replace("-", " ").title() or "News Source"
 
 
 def _salient_focus(img: Image.Image) -> tuple[float, float]:

@@ -4,7 +4,14 @@ from unittest.mock import patch
 from PIL import Image
 
 from models import Story
-from image.maker import _image_description_matches, _fetch_article_photo, _smart_crop, create_fallback_card
+from image.maker import (
+    _context_line,
+    _fetch_article_photo,
+    _image_description_matches,
+    _smart_crop,
+    _source_display_name,
+    create_fallback_card,
+)
 
 
 def test_stock_metadata_must_overlap_query():
@@ -53,3 +60,24 @@ def test_smart_crop_keeps_off_center_subject_visible():
     cropped = _smart_crop(image, 1200, 1500)
     pixels = np.asarray(cropped.resize((120, 150)))
     assert ((pixels[:, :, 0] > 180) & (pixels[:, :, 0] > pixels[:, :, 1] * 1.5)).any()
+
+
+def test_card_context_uses_distinct_high_value_detail():
+    story = Story(
+        title="UK imposes sanctions on West Bank settlements",
+        source_name="NYT > World",
+        source_url="https://nytimes.com/story",
+        published_at=datetime.now(timezone.utc),
+        raw_summary=(
+            "The UK imposes sanctions on West Bank settlements. "
+            "The package is expected to include a trade ban on goods produced there."
+        ),
+    )
+    context = _context_line(story)
+    assert "trade ban" in context.lower()
+    assert context.lower() != story.title.lower()
+
+
+def test_source_display_name_uses_publisher_domain():
+    assert _source_display_name("NYT > World", "https://www.nytimes.com/world/story") == "New York Times"
+    assert _source_display_name("World", "https://www.washingtonpost.com/world/story") == "Washington Post"
