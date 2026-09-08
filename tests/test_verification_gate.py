@@ -47,6 +47,14 @@ def test_publisher_rejects_provisional_story_before_network_call():
         publish_post(_powerful_provisional_story())
 
 
+def test_publisher_rejects_verified_story_without_image_card():
+    story = _powerful_provisional_story()
+    story.verification_status = VerificationStatus.VERIFIED
+    story.verification_score = 90
+    with pytest.raises(FacebookPublishError, match="image card is required"):
+        publish_post(story)
+
+
 def test_selection_keeps_verified_and_provisional_candidates_separately():
     provisional = _powerful_provisional_story()
     verified = _powerful_provisional_story()

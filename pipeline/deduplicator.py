@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections import defaultdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -44,6 +45,36 @@ def check_duplicate(story: Story) -> None:
     Raises DuplicateStory if a match is found or attempt limit exceeded.
     """
     seen = _load_seen()  # already pruned on load
+    _check_duplicate_in_state(story, seen, _build_title_index(seen))
+
+
+def filter_fresh_stories(
+    stories: list[Story], record_attempts: bool = True
+) -> tuple[list[Story], int]:
+    """Check and record a pipeline batch with one file read and one file write."""
+    seen = _load_seen()
+    fresh: list[Story] = []
+    duplicate_count = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    title_index = _build_title_index(seen)
+
+    for story in stories:
+        try:
+            _check_duplicate_in_state(story, seen, title_index)
+        except DuplicateStory:
+            duplicate_count += 1
+            continue
+        fresh.append(story)
+        if record_attempts:
+            _record_seen(seen, story, permanent=False, now_iso=now_iso)
+
+    if record_attempts and fresh:
+        _save_seen(seen)
+    return fresh, duplicate_count
+
+
+def _check_duplicate_in_state(story: Story, seen: dict, title_index: dict | None = None) -> None:
+    """Check one story against an already-loaded state mapping."""
 
     norm = _normalise(story.title)
 
@@ -52,8 +83,9 @@ def check_duplicate(story: Story) -> None:
         raise DuplicateStory(f"Duplicate URL: {story.source_url}")
 
     # 2. Permanent block — similar title
-    for seen_title in seen.get("titles", []):
-        ratio = SequenceMatcher(None, norm, _normalise(seen_title)).ratio()
+    title_index = title_index or _build_title_index(seen)
+    for seen_title, seen_norm in _candidate_titles(norm, title_index, "permanent"):
+        ratio = SequenceMatcher(None, norm, seen_norm).ratio()
         if ratio >= config.DUPLICATE_TITLE_THRESHOLD:
             raise DuplicateStory(
                 f"Similar title ({ratio:.0%} match): '{story.title}' ≈ '{seen_title}'"
@@ -70,8 +102,9 @@ def check_duplicate(story: Story) -> None:
 
     # 4. Attempt-tracked title similarity — block after MAX_ATTEMPTS
     title_attempts = seen.get("title_attempts", {})
-    for seen_title, entry in title_attempts.items():
-        ratio = SequenceMatcher(None, norm, _normalise(seen_title)).ratio()
+    for seen_title, seen_norm in _candidate_titles(norm, title_index, "attempts"):
+        entry = title_attempts[seen_title]
+        ratio = SequenceMatcher(None, norm, seen_norm).ratio()
         if ratio >= config.DUPLICATE_TITLE_THRESHOLD:
             if entry["count"] >= MAX_ATTEMPTS:
                 raise DuplicateStory(
@@ -80,6 +113,38 @@ def check_duplicate(story: Story) -> None:
                 )
 
     logger.debug("Story is not a duplicate: %s", story.title)
+
+
+def _title_words(normalised: str) -> set[str]:
+    return {word for word in normalised.split() if len(word) >= 4}
+
+
+def _build_title_index(seen: dict) -> dict:
+    """Build a cheap word index before the slower fuzzy title comparison."""
+    result: dict = {}
+    for key, titles in (
+        ("permanent", seen.get("titles", [])),
+        ("attempts", seen.get("title_attempts", {}).keys()),
+    ):
+        rows = [(title, _normalise(title)) for title in titles]
+        words: dict[str, set[int]] = defaultdict(set)
+        for idx, (_, normalised) in enumerate(rows):
+            for word in _title_words(normalised):
+                words[word].add(idx)
+        result[key] = {"rows": rows, "words": words}
+    return result
+
+
+def _candidate_titles(normalised: str, index: dict, key: str):
+    bucket = index[key]
+    rows = bucket["rows"]
+    words = _title_words(normalised)
+    if not words:
+        return rows
+    candidate_ids: set[int] = set()
+    for word in words:
+        candidate_ids.update(bucket["words"].get(word, ()))
+    return [rows[idx] for idx in candidate_ids]
 
 
 def mark_seen(story: Story, permanent: bool = False) -> None:
@@ -92,6 +157,12 @@ def mark_seen(story: Story, permanent: bool = False) -> None:
     """
     seen = _load_seen()
     now_iso = datetime.now(timezone.utc).isoformat()
+    _record_seen(seen, story, permanent=permanent, now_iso=now_iso)
+    _save_seen(seen)
+
+
+def _record_seen(seen: dict, story: Story, permanent: bool, now_iso: str) -> None:
+    """Update an already-loaded state mapping without performing disk I/O."""
 
     if permanent:
         # Move to permanent lists — never pruned
@@ -122,7 +193,6 @@ def mark_seen(story: Story, permanent: bool = False) -> None:
         count = url_attempts[story.source_url]["count"]
         logger.debug("Marked as seen (attempt %d/%d): %s", count, MAX_ATTEMPTS, story.title)
 
-    _save_seen(seen)
 
 
 # ---------------------------------------------------------------------------

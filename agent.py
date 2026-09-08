@@ -42,7 +42,7 @@ Pipeline:
       └── LOW/HOLD  → HOLD or REJECT (score < 60)
       ↓
   STAGE 8  — PUBLISH
-             Facebook Graph API — image post or text-only fallback
+             Facebook Graph API — verified image-card posts only
 
 Usage:
   python agent.py --publish --image                      # all categories, 1 post each
@@ -75,7 +75,7 @@ from models import (
 from news.fetcher import CATEGORIES, fetch_all_categories, fetch_news
 from output.draft_writer import save_draft
 from pipeline.content_validator import ContentValidationError, validate_post
-from pipeline.deduplicator import check_duplicate, mark_seen
+from pipeline.deduplicator import filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
 from pipeline.editorial_scorer import EditorialTier, score_and_filter
 from pipeline.final_quality_check import FinalQualityError, final_quality_check
@@ -178,16 +178,10 @@ def fetch_and_build(
     # STAGE 2 — REMOVE DUPLICATES
     # ==========================================================================
     logger.info("── STAGE 2: Remove Duplicates ──────────────────")
-    fresh_stories = []
-    dup_count = 0
-    for story in clustered_stories:
-        try:
-            check_duplicate(story)
-            fresh_stories.append(story)
-            if not dry_run:
-                mark_seen(story, permanent=False)
-        except DuplicateStory:
-            dup_count += 1
+    fresh_stories, dup_count = filter_fresh_stories(
+        clustered_stories,
+        record_attempts=not dry_run,
+    )
     logger.info("%d fresh stories after deduplication (%d duplicates removed).", len(fresh_stories), dup_count)
     if not fresh_stories:
         logger.warning("All stories were duplicates. Nothing to publish.")
@@ -367,9 +361,21 @@ def fetch_and_build(
                 from image.maker import create_news_image
                 image_path = create_news_image(story)
                 if not image_path:
-                    logger.warning("Image creation returned None — will publish text-only.")
+                    logger.warning("Image creation returned None — keeping story as a draft.")
             except Exception as exc:
-                logger.warning("Image creation failed (%s) — publishing text-only.", exc)
+                logger.warning("Image creation failed (%s) — building branded fallback.", exc)
+                try:
+                    from image.maker import create_fallback_card
+                    image_path = create_fallback_card(story)
+                except Exception as fallback_exc:
+                    logger.error("Branded fallback image failed: %s", fallback_exc)
+
+        if not dry_run and not image_path:
+            story.draft_status = DraftStatus.DRAFT
+            story.rejection_reason = "A relevant image card is required before publishing."
+            save_draft(story)
+            logger.warning("📝 Image required — story retained as draft: %s", story.title[:60])
+            continue
 
         # 6d — Attention score gate
         if not dry_run:
@@ -584,9 +590,11 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         )
 
         image_path = Path(entry.image_path) if entry.image_path else None
-        if image_path and not image_path.exists():
-            logger.warning("Image file missing: %s — publishing text-only.", image_path)
-            image_path = None
+        if not image_path or not image_path.exists():
+            reason = "A valid image card is required before publishing."
+            logger.warning("📝 Review required — %s: %s", reason, entry.title[:60])
+            queue.mark_review_required(entry, reason)
+            continue
 
         if not story.post_content:
             logger.warning("No post content in queue entry for '%s' — skipping.", entry.title[:50])
@@ -597,16 +605,11 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         # The evidence-rich draft was already saved during the fetch stage.
 
         try:
-            if image_path:
-                post_id = publish_post_with_image(story, image_path)
-                logger.info("✅ [%d] Published with image. Post ID: %s | %s",
-                    published_count + 1, post_id, entry.title[:60])
-            else:
-                post_id = publish_post(story)
-                logger.info("✅ [%d] Published (text). Post ID: %s | %s",
-                    published_count + 1, post_id, entry.title[:60])
+            post_id = publish_post_with_image(story, image_path)
+            logger.info("✅ [%d] Published with image. Post ID: %s | %s",
+                published_count + 1, post_id, entry.title[:60])
 
-            queue.mark_published(entry)
+            queue.mark_published(entry, post_id=post_id)
             record_published_title(entry.title)
             mark_seen(story, permanent=True)
             last_published_at = datetime.now(timezone.utc)
@@ -657,9 +660,16 @@ def main(
     with_image:     bool = False,
     queue_status:   bool = False,
     force_now:      bool = False,
+    engagement_report: bool = False,
 ) -> int:
 
     queue = PostingQueue()
+
+    if engagement_report:
+        from facebook.engagement_tracker import collect_published_metrics
+        snapshots = collect_published_metrics(queue._entries)
+        logger.info("Engagement report updated for %d Facebook post(s).", len(snapshots))
+        return 0
 
     if queue_status:
         _print_queue_status(queue)
@@ -696,6 +706,9 @@ def main(
                         entry.verification_reason
                         or "Independent-source verification is required.",
                     ))
+                    continue
+                if not entry.image_path or not Path(entry.image_path).exists():
+                    skipped.append((entry, "A valid image card is required before publishing."))
                     continue
                 ok, reason = queue.deserves_publishing(
                     entry, last_published_at, last_breaking_at
@@ -1333,6 +1346,8 @@ Examples:
     parser.add_argument("--all-categories", action="store_true",  help="Fetch all 14 categories.")
     parser.add_argument("--queue-status",   action="store_true",  help="Show queue status and exit.")
     parser.add_argument("--force-now",      action="store_true",  help="Bypass scheduled window — publish immediately.")
+    parser.add_argument("--engagement-report", action="store_true",
+                        help="Collect reactions, comments and shares for published posts.")
     args = parser.parse_args()
 
     # Backwards compat: --publish --image (old style) → treat as --fetch --image --publish
@@ -1354,4 +1369,5 @@ Examples:
         with_image     = args.image,
         queue_status   = args.queue_status,
         force_now      = args.force_now,
+        engagement_report = args.engagement_report,
     ))

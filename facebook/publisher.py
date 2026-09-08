@@ -1,9 +1,7 @@
 """
 facebook/publisher.py — Publish a draft post to a Facebook Page via the Graph API.
 
-Supports:
-  - Text-only posts  → POST /page/feed
-  - Image posts      → POST /page/photos  (Step 2)
+Supports verified image-card posts through the Facebook photos endpoint.
 
 Requires:
   FACEBOOK_PAGE_ID    — Your Facebook Page ID
@@ -111,7 +109,7 @@ def publish_post_with_image(story: Story, image_path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 def _publish(story: Story, image_path: Optional[Path]) -> str:
-    """Core publish logic — handles both text-only and image posts."""
+    """Core publish logic with mandatory independent verification and image card."""
     if story.draft_status != DraftStatus.READY_FOR_REVIEW:
         raise FacebookPublishError(
             f"Cannot publish a draft with status '{story.draft_status.value}'. "
@@ -125,6 +123,9 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
 
     if not story.post_content:
         raise FacebookPublishError("Story has no post content to publish.")
+
+    if image_path is None or not image_path.exists():
+        raise FacebookPublishError("A valid image card is required before publishing.")
 
     if not config.FACEBOOK_PAGE_ID or not config.FACEBOOK_PAGE_TOKEN:
         raise FacebookPublishError(
@@ -143,10 +144,7 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
             "Please get a fresh token from Facebook and update FACEBOOK_PAGE_TOKEN in .env"
         ) from exc
 
-    if image_path and image_path.exists():
-        return _publish_with_photo(message, image_path, token)
-    else:
-        return _publish_text_only(message, token)
+    return _publish_with_photo(message, image_path, token)
 
 
 def _publish_text_only(message: str, token: str) -> str:

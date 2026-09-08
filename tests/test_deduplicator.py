@@ -19,7 +19,7 @@ os.environ.setdefault("NEWSAPI_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from models import DuplicateStory, Story  # noqa: E402
-from pipeline.deduplicator import check_duplicate, mark_seen  # noqa: E402
+from pipeline.deduplicator import check_duplicate, filter_fresh_stories, mark_seen  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -108,3 +108,21 @@ class TestMarkSeen:
 
         assert "https://example.com/summit" in data["urls"]
         assert "Major Summit Begins in Geneva" in data["titles"]
+
+
+def test_batch_dedup_reads_and_writes_state_once(tmp_path):
+    seen_path = _write_seen(
+        tmp_path,
+        {"urls": [], "titles": [], "url_attempts": {}, "title_attempts": {}},
+    )
+    stories = [
+        _story(f"Distinct story number {i}", f"https://example.com/{i}")
+        for i in range(10)
+    ]
+    with patch("config.SEEN_STORIES_PATH", str(seen_path)), \
+         patch("pipeline.deduplicator._save_seen", wraps=__import__("pipeline.deduplicator", fromlist=["_save_seen"])._save_seen) as save:
+        fresh, duplicates = filter_fresh_stories(stories)
+
+    assert len(fresh) == 10
+    assert duplicates == 0
+    assert save.call_count == 1

@@ -236,6 +236,7 @@ class QueueEntry:
     verification_status: str       = VerificationStatus.UNVERIFIED.value
     verification_score: float      = 0.0
     verification_reason: str       = ""
+    facebook_post_id: Optional[str] = None
 
     @property
     def route_enum(self) -> Route:
@@ -507,9 +508,10 @@ class PostingQueue:
             self._save()
         return changed
 
-    def mark_published(self, entry: QueueEntry) -> None:
+    def mark_published(self, entry: QueueEntry, post_id: Optional[str] = None) -> None:
         entry.status       = "PUBLISHED"
         entry.published_at = datetime.now(timezone.utc).isoformat()
+        entry.facebook_post_id = post_id
         self._audit(
             entry.title, entry.score, entry.category_tier,
             entry.route_enum, "PUBLISHED",

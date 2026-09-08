@@ -74,6 +74,15 @@ class TestVerifyStory:
 
         assert result.verification_status == VerificationStatus.UNVERIFIED
 
+    def test_related_publisher_domains_do_not_count_twice(self):
+        story = _story(url="https://bbc.com/news/story")
+        story.source_name = "BBC News"
+        story.corroborating_sources = [
+            _source(name="BBC News UK", url="https://bbc.co.uk/news/another-story")
+        ]
+        result = verify_story(story)
+        assert result.verification_status == VerificationStatus.UNVERIFIED
+
     def test_syndicated_copy_does_not_count_as_independent(self):
         repeated = "The same wire report describes the city attack and confirmed casualties. " * 5
         story = _story(summary=repeated)

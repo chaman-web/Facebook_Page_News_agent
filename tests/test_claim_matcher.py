@@ -37,3 +37,15 @@ def test_opposite_outcomes_are_material():
 
     assert result.matched is False
     assert "conflicting outcome language" in result.contradictions
+
+
+def test_republished_wire_copy_is_not_independent():
+    result = compare_reports(
+        "Central bank changes interest rates",
+        "The central bank changed interest rates after its scheduled meeting.",
+        "Central bank changes interest rates",
+        "By Jane Reporter, Reuters - The central bank changed rates after its meeting.",
+        primary_domain="reuters.com",
+        other_domain="finance.example.com",
+    )
+    assert result.syndicated_copy is True

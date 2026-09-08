@@ -431,6 +431,23 @@ def canonical_domain(url: str) -> str:
         return ""
 
 
+_PUBLISHER_GROUPS = {
+    "bbc.com": "bbc",
+    "bbc.co.uk": "bbc",
+    "reuters.com": "reuters",
+    "apnews.com": "associated-press",
+    "associatedpress.com": "associated-press",
+    "afp.com": "afp",
+    "france24.com": "france24",
+}
+
+
+def publisher_identity(url_or_domain: str) -> str:
+    """Return one ownership identity across a publisher's related domains."""
+    domain = canonical_domain(url_or_domain)
+    return _PUBLISHER_GROUPS.get(domain, domain)
+
+
 # Backwards-compatible private alias used by older imports/tests.
 _extract_domain = canonical_domain
 

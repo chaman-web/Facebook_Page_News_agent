@@ -59,6 +59,8 @@ logger = logging.getLogger(__name__)
 CLUSTER_TIME_WINDOW_HOURS  = 12      # stories within 12h may be same event
 TITLE_SIMILARITY_THRESHOLD = 0.45   # difflib ratio threshold for same-event
 ENTITY_OVERLAP_THRESHOLD   = 3      # shared named entity tokens to auto-cluster
+PARAPHRASE_TITLE_OVERLAP   = 1
+PARAPHRASE_CONTEXT_OVERLAP = 4
 
 # Contradiction pairs — if both sides appear in same cluster, don't merge
 _CONTRADICTION_PAIRS: list[tuple[str, str]] = [
@@ -199,9 +201,9 @@ def _build_clusters(stories: list[Story]) -> list[list[Story]]:
     for story in stories:
         assigned = False
         for cluster in clusters:
-            # Use the first story in the cluster as the representative
-            rep = cluster[0]
-            if _same_event(story, rep):
+            # Compare against a few members so a paraphrased report can join
+            # through another corroborator rather than only the first headline.
+            if any(_same_event(story, member) for member in cluster[:4]):
                 cluster.append(story)
                 assigned = True
                 break
@@ -241,19 +243,32 @@ def _same_event(a: Story, b: Story) -> bool:
 
     # 2a. Title similarity
     similarity = SequenceMatcher(None, title_a, title_b).ratio()
-    if similarity >= TITLE_SIMILARITY_THRESHOLD:
+    entities_a = _extract_entities(title_a)
+    entities_b = _extract_entities(title_b)
+    overlap = len(entities_a & entities_b)
+    if similarity >= TITLE_SIMILARITY_THRESHOLD and (similarity >= 0.72 or overlap >= 2):
         # 3. Contradiction check before confirming same event
         if _contradicts(title_a, title_b):
             return False
         return True
 
     # 2b. Entity/keyword overlap
-    entities_a = _extract_entities(title_a)
-    entities_b = _extract_entities(title_b)
-    overlap    = len(entities_a & entities_b)
     if overlap >= ENTITY_OVERLAP_THRESHOLD:
         if _contradicts(title_a, title_b):
             return False
+        return True
+
+    # 2c. Conservative paraphrase fallback. Headline anchors and supporting
+    # lead context must both agree, so generic summaries cannot merge events.
+    title_terms_a = _event_tokens(a.title)
+    title_terms_b = _event_tokens(b.title)
+    context_terms_a = _event_tokens(f"{a.title} {(a.raw_summary or '')[:500]}")
+    context_terms_b = _event_tokens(f"{b.title} {(b.raw_summary or '')[:500]}")
+    if (
+        len(title_terms_a & title_terms_b) >= PARAPHRASE_TITLE_OVERLAP
+        and len(context_terms_a & context_terms_b) >= PARAPHRASE_CONTEXT_OVERLAP
+        and not _contradicts(title_a, title_b)
+    ):
         return True
 
     return False
@@ -289,6 +304,28 @@ def _extract_entities(text: str) -> set[str]:
     numbers = set(re.findall(r"\b\d{2,}\b", text))
 
     return tokens | numbers
+
+
+def _event_tokens(text: str) -> set[str]:
+    """Normalize light grammatical variants for paraphrase matching."""
+    aliases = {
+        "inaugurate": "open", "inaugurated": "open", "opens": "open",
+        "opened": "open", "launch": "open", "launched": "open",
+        "crossing": "bridge", "crossings": "bridge",
+        "deaths": "killed", "dead": "killed", "dies": "killed",
+        "injuries": "injured", "wounded": "injured",
+    }
+    result: set[str] = set()
+    for token in _extract_entities(text):
+        token = aliases.get(token, token)
+        if token.endswith("ies") and len(token) > 5:
+            token = token[:-3] + "y"
+        elif token.endswith("ed") and len(token) > 5:
+            token = token[:-2]
+        elif token.endswith("s") and len(token) > 5:
+            token = token[:-1]
+        result.add(aliases.get(token, token))
+    return result
 
 
 # ---------------------------------------------------------------------------

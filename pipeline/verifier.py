@@ -19,6 +19,7 @@ from pipeline.source_classifier import (
     SourceTier,
     TIER5_DOMAINS,
     canonical_domain,
+    publisher_identity,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,8 @@ def verify_story(story: Story, deep: bool = False) -> Story:
         "contradictions": [],
     }]
 
-    seen_domains = {domain}
+    primary_publisher = publisher_identity(domain)
+    seen_publishers = {primary_publisher}
     supporting_domains: set[str] = set()
     material_conflicts: list[str] = []
 
@@ -73,16 +75,18 @@ def verify_story(story: Story, deep: bool = False) -> Story:
             primary_text,
             source.get("title", ""),
             source.get("article_text") or source.get("summary", ""),
+            primary_domain=domain,
+            other_domain=other_domain,
         )
 
         independent = (
             reliable
             and bool(other_domain)
-            and other_domain not in seen_domains
+            and publisher_identity(other_domain) not in seen_publishers
             and not comparison.syndicated_copy
         )
         if other_domain:
-            seen_domains.add(other_domain)
+            seen_publishers.add(publisher_identity(other_domain))
 
         if independent and comparison.matched:
             supporting_domains.add(other_domain)
@@ -96,6 +100,7 @@ def verify_story(story: Story, deep: bool = False) -> Story:
             "name": source.get("name", "Unknown"),
             "url": source.get("url", ""),
             "domain": other_domain,
+            "publisher_identity": publisher_identity(other_domain),
             "tier": other_tier,
             "role": "corroborating",
             "independent": independent,
@@ -169,8 +174,12 @@ def _enrich_from_source_pages(story: Story) -> None:
         fetched += 1
         if article.text:
             source["article_text"] = article.text
+            if not story.article_text:
+                story.article_text = article.text
         elif article.description and len(article.description) > len(source.get("summary", "")):
             source["article_text"] = article.description
+            if not story.article_text:
+                story.article_text = article.description
 
 
 def set_rss_pool(stories: list[Story]) -> None:

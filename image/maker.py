@@ -5,7 +5,7 @@ Design: Full-bleed photo with gradient overlays, editorial style.
 Canvas: 1200 × 1500 px (4:5 mobile-first)
 
 Fallback chain:
-  Pexels (keyword) → Pexels (broad) → Pollinations.ai → None (text-only post)
+  Article image → relevant Pexels image → category fallback → draft hold
 """
 
 from __future__ import annotations
@@ -275,7 +275,7 @@ def create_news_image(story: Story) -> Optional[Path]:
       Attempt 1 — normal composition with fetched photo.
       Attempt 2 — same photo, stronger gradient overlays (boost contrast).
       Attempt 3 — new photo fetch (different keyword), standard overlays.
-      If all 3 fail → log all failures and return None (text-only post).
+      If all attempts fail → return None so the story remains a draft.
     """
     IMAGES_DIR = config.IMAGES_DIR
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -294,11 +294,14 @@ def create_news_image(story: Story) -> Optional[Path]:
 
     # Three search strategies — each tries a different keyword to get a different photo.
     # Fetched lazily so we only call Pexels when the previous attempt failed.
-    search_strategies = [
-        lambda: _fetch_photo(story),                              # specific title keywords
-        lambda: _fetch_photo_by_keyword(_keywords(story.title, broad=True), page=2),  # broad, page 2
-        lambda: _fetch_photo_by_keyword(fallback_kw, page=1),    # category fallback
-    ]
+    search_strategies = []
+    if getattr(story, "article_image_url", None):
+        search_strategies.append(lambda: _fetch_article_photo(story))
+    search_strategies.extend([
+        lambda: _fetch_photo(story),
+        lambda: _fetch_photo_by_keyword(_keywords(story.title, broad=True), page=2),
+        lambda: _fetch_photo_by_keyword(fallback_kw, page=1),
+    ])
 
     fail_summary = ""
     last_photo   = None
@@ -328,12 +331,51 @@ def create_news_image(story: Story) -> Optional[Path]:
             attempt + 1, fail_summary,
         )
 
-    # All 3 different photos failed — return None, caller publishes text-only
-    logger.error(
-        "All 3 image attempts failed for '%s' — publishing text-only. Last issues: %s",
+    # No suitable photo: return None so the caller retains the story as a draft.
+    logger.warning(
+        "All external image attempts failed for '%s' — using branded fallback. Last issues: %s",
         story.title[:60], fail_summary,
     )
-    return None
+    return create_fallback_card(story)
+
+
+def create_fallback_card(story: Story) -> Path:
+    """Create a guaranteed local card when no external image is available."""
+    config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    category = (getattr(story, "category", "") or "news").lower()
+    color = CATEGORY_DOT_COLORS.get(category, CATEGORY_DOT_COLORS["news"])
+
+    background = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), NAVY)
+    draw = ImageDraw.Draw(background, "RGBA")
+    for y in range(IMAGE_HEIGHT):
+        t = y / max(IMAGE_HEIGHT - 1, 1)
+        draw.line(
+            (0, y, IMAGE_WIDTH, y),
+            fill=(
+                int(NAVY[0] + color[0] * t * 0.22),
+                int(NAVY[1] + color[1] * t * 0.22),
+                int(NAVY[2] + color[2] * t * 0.22),
+                255,
+            ),
+        )
+    # Abstract newsroom/world pattern adds depth without implying a false photo.
+    for radius, alpha in ((430, 32), (330, 42), (230, 52)):
+        box = (
+            IMAGE_WIDTH - radius - 120,
+            IMAGE_HEIGHT // 2 - radius,
+            IMAGE_WIDTH + radius - 120,
+            IMAGE_HEIGHT // 2 + radius,
+        )
+        draw.ellipse(box, outline=(*color, alpha), width=5)
+    for offset in range(-500, 700, 120):
+        draw.line((offset, IMAGE_HEIGHT, offset + 900, 0), fill=(255, 255, 255, 16), width=3)
+
+    card = _compose(background, story, strong_gradients=False)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
+    out_path = config.IMAGES_DIR / f"{safe}_fallback.jpg"
+    card.save(out_path, "JPEG", quality=93, optimize=True)
+    logger.info("✅ Branded fallback image saved: %s", out_path)
+    return out_path
 
 
 def _mobile_visibility_check(image: Image.Image, story: Story,
@@ -562,6 +604,41 @@ def _fetch_photo_by_keyword(keyword: str, page: int = 1) -> Optional[Image.Image
     return None
 
 
+def _fetch_article_photo(story: Story) -> Optional[Image.Image]:
+    """Prefer the publisher's own story image when it is usable."""
+    url = getattr(story, "article_image_url", None)
+    if not url:
+        return None
+    logger.info("Trying article image from %s", story.source_name)
+    image = _download(url)
+    if image:
+        logger.info("Using authentic article image from %s", story.source_name)
+    return image
+
+
+def _relevance_terms(text: str) -> set[str]:
+    stop = {
+        "about", "after", "before", "from", "have", "image", "news", "photo",
+        "says", "that", "their", "this", "with", "world", "people", "person",
+    }
+    return {
+        word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text or "")
+        if word.lower() not in stop
+    }
+
+
+def _image_description_matches(query: str, description: str) -> bool:
+    """Use provider metadata to reject clearly unrelated stock results."""
+    query_terms = _relevance_terms(query)
+    description_terms = _relevance_terms(description)
+    if not query_terms or not description_terms:
+        return True
+    return bool(query_terms & description_terms) or any(
+        len(left) >= 5 and len(right) >= 5 and left[:5] == right[:5]
+        for left in query_terms for right in description_terms
+    )
+
+
 def _fetch_photo(story: Story) -> Optional[Image.Image]:
     # Category → reliable generic image keywords
     _CATEGORY_FALLBACK: dict[str, str] = {
@@ -612,8 +689,16 @@ def _pexels(query: str, page: int = 1) -> Optional[Image.Image]:
         photos = r.json().get("photos", [])
         if not photos:
             return None
-        url = photos[0]["src"]["large2x"]
-        logger.info("Pexels image (page %d) by %s", page, photos[0].get("photographer", "unknown"))
+        relevant = [
+            photo for photo in photos
+            if _image_description_matches(query, photo.get("alt", ""))
+        ]
+        if not relevant:
+            logger.warning("Pexels returned %d images, but metadata did not match '%s'.", len(photos), query)
+            return None
+        chosen = relevant[0]
+        url = chosen["src"]["large2x"]
+        logger.info("Pexels relevant image (page %d) by %s", page, chosen.get("photographer", "unknown"))
         return _download(url)
     except Exception as exc:
         logger.warning("Pexels error: %s", exc)
@@ -640,7 +725,15 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
     try:
         r = requests.get(url, timeout=timeout, stream=True)
         r.raise_for_status()
-        return Image.open(BytesIO(r.content)).convert("RGB")
+        content_type = r.headers.get("content-type", "").lower()
+        if content_type and not content_type.startswith("image/"):
+            raise ValueError(f"unexpected content type: {content_type}")
+        if len(r.content) > 15 * 1024 * 1024:
+            raise ValueError("image exceeds 15 MB")
+        image = Image.open(BytesIO(r.content)).convert("RGB")
+        if image.width < 600 or image.height < 600:
+            raise ValueError(f"image is too small: {image.width}x{image.height}")
+        return image
     except Exception as exc:
         logger.error("Image download failed: %s", exc)
         return None
@@ -649,186 +742,115 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
 # ── Composition ───────────────────────────────────────────────────────────────
 
 def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -> Image.Image:
+    """Compose the mobile-first Global Pulse News card."""
     category = (getattr(story, "category", "") or "").lower().strip()
     if category not in CATEGORY_LABELS:
         category = "news"
-    accent = BRAND_ACCENT
-    label  = CATEGORY_LABELS[category]
+    label = CATEGORY_LABELS[category]
+    dot_color = CATEGORY_DOT_COLORS[category]
 
-    # ── 1. Full-bleed photo as base ───────────────────────────────────────────
-    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).copy()
-    draw   = ImageDraw.Draw(canvas, "RGBA")
+    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).convert("RGBA")
+    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    odraw = ImageDraw.Draw(overlay, "RGBA")
 
-    # ── 2. Top gradient — dark at top, fades to transparent ──────────────────
-    top_alpha = 255 if strong_gradients else 230
-    mid_alpha = 160 if strong_gradients else 40
-    _gradient_rect(draw, 0, 0, IMAGE_WIDTH, int(IMAGE_HEIGHT * 0.45),
-                   top_color=(*NAVY, top_alpha), bottom_color=(*NAVY, mid_alpha))
+    # Strong contrast at the headline and footer, while keeping the subject visible.
+    top_alpha = 245 if strong_gradients else 220
+    _gradient_rect(odraw, 0, 0, IMAGE_WIDTH, 690,
+                   top_color=(*NAVY, top_alpha), bottom_color=(*NAVY, 35))
+    _gradient_rect(odraw, 0, 820, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 235))
+    odraw.rectangle((0, 0, IMAGE_WIDTH - 1, IMAGE_HEIGHT - 1),
+                    outline=(*BRAND_ACCENT, 255), width=8)
 
-    # ── 3. Bottom gradient — transparent at mid, solid at bottom ─────────────
-    _gradient_rect(draw, 0, int(IMAGE_HEIGHT * 0.55), IMAGE_WIDTH, IMAGE_HEIGHT,
-                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 255))
+    # Bottom information panel.
+    panel = (ML, IMAGE_HEIGHT - 365, IMAGE_WIDTH - MR, IMAGE_HEIGHT - 55)
+    odraw.rounded_rectangle(panel, radius=26, fill=(*NAVY, 225),
+                            outline=(255, 255, 255, 45), width=2)
+    canvas = Image.alpha_composite(canvas, overlay)
+    draw = ImageDraw.Draw(canvas)
 
-    # ── 4. Extra darkening near footer ───────────────────────────────────────
-    _gradient_rect(draw, 0, IMAGE_HEIGHT - 300, IMAGE_WIDTH, IMAGE_HEIGHT,
-                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 210))
-
-    # ── 5. Thin red accent border top & bottom ────────────────────────────────
-    draw.rectangle([(0, 0), (IMAGE_WIDTH, 5)], fill=(*accent, 255))
-    draw.rectangle([(0, IMAGE_HEIGHT - 5), (IMAGE_WIDTH, IMAGE_HEIGHT)], fill=(*accent, 255))
-
-    # Commit RGBA, switch to RGB draw
-    canvas = canvas.convert("RGB")
-    draw   = ImageDraw.Draw(canvas)
-
-    # ── 6. Category badge (top-left) ─────────────────────────────────────────
-    lbl_font   = _font("Montserrat-Bold.ttf", LABEL_SIZE)
-    lbl_w      = int(draw.textlength(label, font=lbl_font))
-    lbl_px, lbl_py = 18, 8
-    bx1, by1 = ML, MT
-    bx2 = bx1 + lbl_w + lbl_px * 2
-    by2 = by1 + LABEL_SIZE + lbl_py * 2
-
-    # Shadow
-    draw.rectangle([(bx1 + 3, by1 + 3), (bx2 + 3, by2 + 3)], fill=(0, 0, 0))
-    # Badge body
-    draw.rectangle([(bx1, by1), (bx2, by2)], fill=NAVY_LIGHT)
-    # White left stripe
-    draw.rectangle([(bx1, by1), (bx1 + 5, by2)], fill=WHITE)
-    # Label text
-    draw.text((bx1 + lbl_px, by1 + lbl_py), label, font=lbl_font, fill=WHITE)
-
-    label_bottom = by2
-
-    # ── 7. Headline (below badge, in top dark zone) ───────────────────────────
-    # Prefer AI-generated card headline; fall back to shortened raw title
-    headline     = getattr(story, "card_headline", None) or _short_headline(story.title)
-    impact_words = _find_impact_words(headline)   # up to 2 words
-    max_w        = IMAGE_WIDTH - ML - MR
-    hl_size      = HEADLINE_SIZE
-    hl_font      = _font("Montserrat-ExtraBold.ttf", hl_size)
-    wrapped      = _wrap_text(draw, headline, hl_font, max_w)
-    lines        = wrapped.splitlines()
-
-    while (len(lines) > 3 or len(lines) * int(hl_size * 1.2) > 310) and hl_size > HEADLINE_MIN:
-        hl_size  = hl_size - 4
-        hl_font  = _font("Montserrat-ExtraBold.ttf", hl_size)
-        wrapped  = _wrap_text(draw, headline, hl_font, max_w)
-        lines    = wrapped.splitlines()
-
-    if len(lines) > 3:
-        lines = lines[:3]
-        logger.warning("Headline forced to 3 lines: %s", story.title)
-
-    hl_y   = label_bottom + 24
-    line_h = int(hl_size * 1.2)
-
-    remaining_impacts = list(impact_words)  # copy so we can pop as we use them
-
-    for line in lines:
-        # Drop shadow
-        for ox, oy in [(3, 3), (2, 2), (1, 1)]:
-            draw.text((ML + ox, hl_y + oy), line, font=hl_font, fill=(0, 0, 0))
-        draw.text((ML, hl_y), line, font=hl_font, fill=WHITE)
-
-        # Red highlight box on impact words (up to 2 total across all lines)
-        if remaining_impacts:
-            x_cursor = ML
-            for w in line.split():
-                w_width = int(draw.textlength(w + " ", font=hl_font))
-                # Check if this word matches any remaining impact word
-                matched = next(
-                    (iw for iw in remaining_impacts if w.upper() == iw.upper()), None
-                )
-                if matched:
-                    pad = 6
-                    draw.rectangle(
-                        [(x_cursor - pad, hl_y - 2),
-                         (x_cursor + w_width - int(draw.textlength(" ", font=hl_font)) + pad,
-                          hl_y + hl_size + 2)],
-                        fill=RED_DARK,
-                    )
-                    draw.text((x_cursor, hl_y), w, font=hl_font, fill=WHITE)
-                    remaining_impacts.remove(matched)
-                x_cursor += w_width
-
-        hl_y += line_h
-
-    # ── 8. Short accent rule below headline ───────────────────────────────────
-    rule_y = hl_y + 10
-    draw.rectangle([(ML, rule_y), (ML + 120, rule_y + 4)], fill=accent)
-
-    # ── 9. Context line (above footer) ────────────────────────────────────────
-    context   = _context_line(story)
-    CONTEXT_Y = IMAGE_HEIGHT - 290
-
-    if context:
-        ctx_font = _font("Montserrat-SemiBold.ttf", CONTEXT_SIZE)
-        while draw.textlength(context, font=ctx_font) > max_w and len(context) > 10:
-            context = context[:context.rfind(" ")] + "..."
-        draw.rectangle([(ML, CONTEXT_Y + 2), (ML + 4, CONTEXT_Y + CONTEXT_SIZE - 2)], fill=accent)
-        draw.text((ML + 16, CONTEXT_Y), context, font=ctx_font, fill=OFF_WHITE)
-
-    # ── 10. Footer: logo | divider | source + date ────────────────────────────
-    FOOTER_MID = IMAGE_HEIGHT - 95
-    logo_path  = Path(__file__).parent.parent / "assets" / "logo.png"
-    LOGO_H = LOGO_W = 100
-    logo_right = ML
-
+    # Compact brand bar.
+    bar = (ML, MT, IMAGE_WIDTH - MR, MT + 100)
+    draw.rounded_rectangle(bar, radius=25, fill=(*NAVY, 220),
+                           outline=(255, 255, 255, 210), width=2)
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    logo_size = 76
+    brand_x = ML + 24
     if logo_path.exists():
-        logo   = Image.open(logo_path).convert("RGBA")
-        logo   = logo.resize((LOGO_W, LOGO_H), Image.LANCZOS)
-        logo_y = FOOTER_MID - LOGO_H // 2
-        canvas.paste(logo, (ML, logo_y), logo.split()[3])
-        logo_right = ML + LOGO_W
-    else:
-        logo_right = ML
+        logo = Image.open(logo_path).convert("RGBA").resize((logo_size, logo_size), Image.LANCZOS)
+        canvas.alpha_composite(logo, (brand_x, MT + 12))
+        brand_x += logo_size + 24
+    brand_font = _font("Montserrat-Bold.ttf", 36)
+    draw.text((brand_x, MT + 28), "GLOBAL PULSE NEWS", font=brand_font, fill=WHITE)
 
-    # Vertical divider
-    div_x  = logo_right + 20
-    div_y1 = FOOTER_MID - 38
-    div_y2 = FOOTER_MID + 38
-    for offset, alpha in [(2, 40), (1, 90), (0, 200)]:
-        draw.rectangle([(div_x - offset, div_y1), (div_x + offset, div_y2)],
-                       fill=(*accent[:3], alpha))
+    badge_font = _font("Montserrat-SemiBold.ttf", 25)
+    badge_w = int(draw.textlength(label, font=badge_font)) + 86
+    badge = (IMAGE_WIDTH - MR - badge_w, MT + 22, IMAGE_WIDTH - MR - 24, MT + 78)
+    draw.rounded_rectangle(badge, radius=28, fill=(*BRAND_ACCENT, 255))
+    draw.ellipse((badge[0] + 22, badge[1] + 19, badge[0] + 40, badge[1] + 37), fill=dot_color)
+    draw.text((badge[0] + 52, badge[1] + 12), label, font=badge_font, fill=WHITE)
 
-    # Source names
+    # Responsive headline with red text emphasis instead of bulky highlight boxes.
+    headline = getattr(story, "card_headline", None) or _short_headline(story.title)
+    impact_words = {w.upper() for w in _find_impact_words(headline)}
+    max_w = IMAGE_WIDTH - ML - MR
+    hl_size = 88
+    while True:
+        hl_font = _font("Montserrat-ExtraBold.ttf", hl_size)
+        lines = _wrap_text(draw, headline, hl_font, max_w).splitlines()
+        if len(lines) <= 3 or hl_size <= HEADLINE_MIN:
+            break
+        hl_size -= 4
+    lines = lines[:3]
+    y = MT + 205
+    line_h = int(hl_size * 1.22)
+    space_w = draw.textlength(" ", font=hl_font)
+    for line in lines:
+        x = ML
+        line_is_emphasis = bool(
+            re.search(r"(?:\d[\d,.]*%?|[$£€]\s*\d)", line)
+            or any(re.sub(r"[^A-Za-z']", "", w).upper() in impact_words for w in line.split())
+        )
+        for word in line.split():
+            clean = re.sub(r"[^A-Za-z']", "", word).upper()
+            fill = BRAND_ACCENT if line_is_emphasis or clean in impact_words else WHITE
+            draw.text((x + 4, y + 5), word, font=hl_font, fill=(0, 0, 0, 170))
+            draw.text((x, y), word, font=hl_font, fill=fill)
+            x += draw.textlength(word, font=hl_font) + space_w
+        y += line_h
+    draw.rounded_rectangle((ML, y + 8, ML + 178, y + 20), radius=6, fill=BRAND_ACCENT)
+
+    # Context and source hierarchy in one stable mobile-safe panel.
+    context = _context_line(story)
+    topic_font = _font("Montserrat-SemiBold.ttf", 26)
+    body_font = _font("Montserrat-Bold.ttf", 31)
+    source_font = _font("Montserrat-SemiBold.ttf", 22)
+    px, py = ML + 30, panel[1] + 38
+    draw.text((px, py), label, font=topic_font, fill=BRAND_ACCENT)
+    if context:
+        wrapped_context = _wrap_text(draw, context, body_font, panel[2] - px - 30)
+        context_lines = wrapped_context.splitlines()[:2]
+        draw.multiline_text((px, py + 48), "\n".join(context_lines),
+                            font=body_font, fill=WHITE, spacing=10)
+
+    divider_y = panel[3] - 68
+    draw.line((px, divider_y, panel[2] - 30, divider_y), fill=(255, 255, 255, 80), width=2)
     sources = [story.source_name]
     if story.corroborating_sources:
         extra = story.corroborating_sources[0].get("name", "")
         if extra and extra != story.source_name:
             sources.append(extra)
+    source_text = "SOURCE  •  " + " / ".join(s.upper() for s in sources[:2])
+    max_source_w = 700
+    while draw.textlength(source_text, font=source_font) > max_source_w and len(source_text) > 20:
+        source_text = source_text[:-4].rstrip() + "..."
+    draw.text((px, divider_y + 22), source_text, font=source_font, fill=OFF_WHITE)
+    date_text = datetime.now(timezone.utc).strftime("%d %b").upper()
+    date_w = draw.textlength(date_text, font=source_font)
+    draw.text((panel[2] - 30 - date_w, divider_y + 22), date_text,
+              font=source_font, fill=OFF_WHITE)
 
-    src_x    = div_x + 24
-    pri_font = _font("Montserrat-ExtraBold.ttf", SOURCE_SIZE + 4)
-    sec_font = _font("Montserrat-Medium.ttf",    SOURCE_SIZE)
-    pri_h    = SOURCE_SIZE + 4
-    sec_h    = SOURCE_SIZE
-    total_h  = pri_h + (8 + sec_h if len(sources) > 1 else 0)
-    sy       = FOOTER_MID - total_h // 2
-
-    # Primary source
-    pri_name  = sources[0].upper()
-    src_max_w = IMAGE_WIDTH - MR - src_x - 20
-    while draw.textlength(pri_name, font=pri_font) > src_max_w and len(pri_name) > 4:
-        pri_name = pri_name[:-2].rstrip() + "."
-    draw.text((src_x, sy), pri_name, font=pri_font, fill=WHITE)
-
-    # Secondary source
-    if len(sources) > 1:
-        sy2      = sy + pri_h + 8
-        sec_name = sources[1].upper()
-        draw.text((src_x, sy2), sec_name, font=sec_font, fill=OFF_WHITE)
-
-    # Date (right-aligned)
-    date_str  = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
-    date_font = _font("Montserrat-Bold.ttf", DATE_SIZE + 4)
-    date_w    = int(draw.textlength(date_str, font=date_font))
-    date_x    = IMAGE_WIDTH - MR - date_w
-    date_y    = FOOTER_MID - (DATE_SIZE + 4) // 2
-    draw.text((date_x, date_y), date_str, font=date_font, fill=OFF_WHITE)
-
-    return canvas
+    return canvas.convert("RGB")
 
 def _draw_rounded_rect(draw, x1, y1, x2, y2, radius, fill):
     """Fill a rounded rectangle (RGBA fill tuple)."""
@@ -891,16 +913,48 @@ def _context_line(story: Story) -> str:
     words = first.split()
     if len(words) < 4:
         return ""
-    return " ".join(words[:12]) + ("..." if len(words) > 12 else "")
+    return " ".join(words[:20]) + ("..." if len(words) > 20 else "")
+
+
+def _salient_focus(img: Image.Image) -> tuple[float, float]:
+    """Estimate the important visual region using edges and colour contrast."""
+    import numpy as np
+
+    sample = img.convert("RGB")
+    sample.thumbnail((360, 360), Image.LANCZOS)
+    arr = np.asarray(sample, dtype=np.float32)
+    gray = arr.mean(axis=2)
+    gx = np.abs(np.diff(gray, axis=1, prepend=gray[:, :1]))
+    gy = np.abs(np.diff(gray, axis=0, prepend=gray[:1, :]))
+    saturation = arr.max(axis=2) - arr.min(axis=2)
+    weights = gx + gy + saturation * 0.25
+
+    # Ignore frame edges, watermarks, and borders.
+    margin_x = max(1, sample.width // 20)
+    margin_y = max(1, sample.height // 20)
+    weights[:margin_y, :] = 0
+    weights[-margin_y:, :] = 0
+    weights[:, :margin_x] = 0
+    weights[:, -margin_x:] = 0
+    total = float(weights.sum())
+    if total <= 0:
+        return 0.5, 0.5
+    ys, xs = np.indices(weights.shape)
+    return float((xs * weights).sum() / total / sample.width), float((ys * weights).sum() / total / sample.height)
 
 
 def _smart_crop(img: Image.Image, tw: int, th: int) -> Image.Image:
-    w, h   = img.size
+    """Crop around the most visually important region instead of blindly centering."""
+    focus_x, focus_y = _salient_focus(img)
+    w, h = img.size
     scale  = max(tw / w, th / h)
     nw, nh = int(w * scale), int(h * scale)
     img    = img.resize((nw, nh), Image.LANCZOS)
-    left   = (nw - tw) // 2
-    top    = (nh - th) // 2
+    focus_x *= nw
+    focus_y *= nh
+    left = int(max(0, min(nw - tw, focus_x - tw * 0.5)))
+    # Keep the subject slightly below centre, away from the headline block.
+    top = int(max(0, min(nh - th, focus_y - th * 0.58)))
     return img.crop((left, top, left + tw, top + th))
 
 

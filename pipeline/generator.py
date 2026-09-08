@@ -61,6 +61,7 @@ def generate_post(story: Story) -> Story:
     - Hashtags always generated deterministically
     """
     from openai import OpenAIError
+    from pipeline.post_fact_checker import check_generated_facts
 
     MAX_GENERATION_RETRIES = 3
     model = config.OLLAMA_MODEL if config.LLM_BACKEND == "ollama" else config.OPENAI_MODEL
@@ -99,7 +100,7 @@ def generate_post(story: Story) -> Story:
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.7,
+                temperature=0.35,
             )
         except OpenAIError as exc:
             raise GenerationError(f"LLM call failed ({config.LLM_BACKEND}): {exc}") from exc
@@ -130,6 +131,12 @@ def generate_post(story: Story) -> Story:
 
         hashtags     = _generate_hashtags(story)
         post_content = _format_post(post_content, story)
+        fact_check = check_generated_facts(story, post_content)
+        if not fact_check.passed:
+            last_error = GenerationError("Generated caption failed fact grounding: " + "; ".join(fact_check.issues[:4]))
+            logger.warning("Caption fact-check failed (attempt %d/%d): %s", attempt, MAX_GENERATION_RETRIES, last_error)
+            continue
+
         story.post_content  = post_content
         story.hashtags      = hashtags
         story.card_headline = (_parse_card_headline(raw_output)
