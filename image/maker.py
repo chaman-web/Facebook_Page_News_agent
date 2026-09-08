@@ -742,115 +742,134 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
 # ── Composition ───────────────────────────────────────────────────────────────
 
 def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -> Image.Image:
-    """Compose the mobile-first Global Pulse News card."""
     category = (getattr(story, "category", "") or "").lower().strip()
     if category not in CATEGORY_LABELS:
         category = "news"
+    accent = BRAND_ACCENT
     label = CATEGORY_LABELS[category]
-    dot_color = CATEGORY_DOT_COLORS[category]
 
-    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).convert("RGBA")
-    overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
-    odraw = ImageDraw.Draw(overlay, "RGBA")
+    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).copy()
+    draw = ImageDraw.Draw(canvas, "RGBA")
 
-    # Strong contrast at the headline and footer, while keeping the subject visible.
-    top_alpha = 245 if strong_gradients else 220
-    _gradient_rect(odraw, 0, 0, IMAGE_WIDTH, 690,
-                   top_color=(*NAVY, top_alpha), bottom_color=(*NAVY, 35))
-    _gradient_rect(odraw, 0, 820, IMAGE_WIDTH, IMAGE_HEIGHT,
-                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 235))
-    odraw.rectangle((0, 0, IMAGE_WIDTH - 1, IMAGE_HEIGHT - 1),
-                    outline=(*BRAND_ACCENT, 255), width=8)
+    top_alpha = 255 if strong_gradients else 230
+    mid_alpha = 160 if strong_gradients else 40
+    _gradient_rect(draw, 0, 0, IMAGE_WIDTH, int(IMAGE_HEIGHT * 0.45),
+                   top_color=(*NAVY, top_alpha), bottom_color=(*NAVY, mid_alpha))
+    _gradient_rect(draw, 0, int(IMAGE_HEIGHT * 0.55), IMAGE_WIDTH, IMAGE_HEIGHT,
+                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 255))
+    _gradient_rect(draw, 0, IMAGE_HEIGHT - 300, IMAGE_WIDTH, IMAGE_HEIGHT,
+                   top_color=(*NAVY, 0), bottom_color=(*NAVY, 210))
+    draw.rectangle([(0, 0), (IMAGE_WIDTH, 5)], fill=(*accent, 255))
+    draw.rectangle([(0, IMAGE_HEIGHT - 5), (IMAGE_WIDTH, IMAGE_HEIGHT)], fill=(*accent, 255))
 
-    # Bottom information panel.
-    panel = (ML, IMAGE_HEIGHT - 365, IMAGE_WIDTH - MR, IMAGE_HEIGHT - 55)
-    odraw.rounded_rectangle(panel, radius=26, fill=(*NAVY, 225),
-                            outline=(255, 255, 255, 45), width=2)
-    canvas = Image.alpha_composite(canvas, overlay)
+    canvas = canvas.convert("RGB")
     draw = ImageDraw.Draw(canvas)
 
-    # Compact brand bar.
-    bar = (ML, MT, IMAGE_WIDTH - MR, MT + 100)
-    draw.rounded_rectangle(bar, radius=25, fill=(*NAVY, 220),
-                           outline=(255, 255, 255, 210), width=2)
-    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
-    logo_size = 76
-    brand_x = ML + 24
-    if logo_path.exists():
-        logo = Image.open(logo_path).convert("RGBA").resize((logo_size, logo_size), Image.LANCZOS)
-        canvas.alpha_composite(logo, (brand_x, MT + 12))
-        brand_x += logo_size + 24
-    brand_font = _font("Montserrat-Bold.ttf", 36)
-    draw.text((brand_x, MT + 28), "GLOBAL PULSE NEWS", font=brand_font, fill=WHITE)
+    lbl_font = _font("Montserrat-Bold.ttf", LABEL_SIZE)
+    lbl_w = int(draw.textlength(label, font=lbl_font))
+    lbl_px, lbl_py = 18, 8
+    bx1, by1 = ML, MT
+    bx2 = bx1 + lbl_w + lbl_px * 2
+    by2 = by1 + LABEL_SIZE + lbl_py * 2
+    draw.rectangle([(bx1 + 3, by1 + 3), (bx2 + 3, by2 + 3)], fill=(0, 0, 0))
+    draw.rectangle([(bx1, by1), (bx2, by2)], fill=NAVY_LIGHT)
+    draw.rectangle([(bx1, by1), (bx1 + 5, by2)], fill=WHITE)
+    draw.text((bx1 + lbl_px, by1 + lbl_py), label, font=lbl_font, fill=WHITE)
 
-    badge_font = _font("Montserrat-SemiBold.ttf", 25)
-    badge_w = int(draw.textlength(label, font=badge_font)) + 86
-    badge = (IMAGE_WIDTH - MR - badge_w, MT + 22, IMAGE_WIDTH - MR - 24, MT + 78)
-    draw.rounded_rectangle(badge, radius=28, fill=(*BRAND_ACCENT, 255))
-    draw.ellipse((badge[0] + 22, badge[1] + 19, badge[0] + 40, badge[1] + 37), fill=dot_color)
-    draw.text((badge[0] + 52, badge[1] + 12), label, font=badge_font, fill=WHITE)
-
-    # Responsive headline with red text emphasis instead of bulky highlight boxes.
     headline = getattr(story, "card_headline", None) or _short_headline(story.title)
-    impact_words = {w.upper() for w in _find_impact_words(headline)}
+    impact_words = _find_impact_words(headline)
     max_w = IMAGE_WIDTH - ML - MR
-    hl_size = 88
-    while True:
+    hl_size = HEADLINE_SIZE
+    hl_font = _font("Montserrat-ExtraBold.ttf", hl_size)
+    lines = _wrap_text(draw, headline, hl_font, max_w).splitlines()
+    while (len(lines) > 3 or len(lines) * int(hl_size * 1.2) > 310) and hl_size > HEADLINE_MIN:
+        hl_size -= 4
         hl_font = _font("Montserrat-ExtraBold.ttf", hl_size)
         lines = _wrap_text(draw, headline, hl_font, max_w).splitlines()
-        if len(lines) <= 3 or hl_size <= HEADLINE_MIN:
-            break
-        hl_size -= 4
-    lines = lines[:3]
-    y = MT + 205
-    line_h = int(hl_size * 1.22)
-    space_w = draw.textlength(" ", font=hl_font)
+    if len(lines) > 3:
+        lines = lines[:3]
+        logger.warning("Headline forced to 3 lines: %s", story.title)
+
+    hl_y = by2 + 24
+    line_h = int(hl_size * 1.2)
+    remaining_impacts = list(impact_words)
     for line in lines:
-        x = ML
-        line_is_emphasis = bool(
-            re.search(r"(?:\d[\d,.]*%?|[$£€]\s*\d)", line)
-            or any(re.sub(r"[^A-Za-z']", "", w).upper() in impact_words for w in line.split())
-        )
-        for word in line.split():
-            clean = re.sub(r"[^A-Za-z']", "", word).upper()
-            fill = BRAND_ACCENT if line_is_emphasis or clean in impact_words else WHITE
-            draw.text((x + 4, y + 5), word, font=hl_font, fill=(0, 0, 0, 170))
-            draw.text((x, y), word, font=hl_font, fill=fill)
-            x += draw.textlength(word, font=hl_font) + space_w
-        y += line_h
-    draw.rounded_rectangle((ML, y + 8, ML + 178, y + 20), radius=6, fill=BRAND_ACCENT)
+        for ox, oy in ((3, 3), (2, 2), (1, 1)):
+            draw.text((ML + ox, hl_y + oy), line, font=hl_font, fill=(0, 0, 0))
+        draw.text((ML, hl_y), line, font=hl_font, fill=WHITE)
+        if remaining_impacts:
+            x_cursor = ML
+            for word in line.split():
+                word_width = int(draw.textlength(word + " ", font=hl_font))
+                matched = next((item for item in remaining_impacts if word.upper() == item.upper()), None)
+                if matched:
+                    pad = 6
+                    space_width = int(draw.textlength(" ", font=hl_font))
+                    draw.rectangle(
+                        [(x_cursor - pad, hl_y - 2),
+                         (x_cursor + word_width - space_width + pad, hl_y + hl_size + 2)],
+                        fill=RED_DARK,
+                    )
+                    draw.text((x_cursor, hl_y), word, font=hl_font, fill=WHITE)
+                    remaining_impacts.remove(matched)
+                x_cursor += word_width
+        hl_y += line_h
 
-    # Context and source hierarchy in one stable mobile-safe panel.
+    rule_y = hl_y + 10
+    draw.rectangle([(ML, rule_y), (ML + 120, rule_y + 4)], fill=accent)
+
     context = _context_line(story)
-    topic_font = _font("Montserrat-SemiBold.ttf", 26)
-    body_font = _font("Montserrat-Bold.ttf", 31)
-    source_font = _font("Montserrat-SemiBold.ttf", 22)
-    px, py = ML + 30, panel[1] + 38
-    draw.text((px, py), label, font=topic_font, fill=BRAND_ACCENT)
+    context_y = IMAGE_HEIGHT - 290
     if context:
-        wrapped_context = _wrap_text(draw, context, body_font, panel[2] - px - 30)
-        context_lines = wrapped_context.splitlines()[:2]
-        draw.multiline_text((px, py + 48), "\n".join(context_lines),
-                            font=body_font, fill=WHITE, spacing=10)
+        ctx_font = _font("Montserrat-SemiBold.ttf", CONTEXT_SIZE)
+        while draw.textlength(context, font=ctx_font) > max_w and len(context) > 10:
+            context = context[:context.rfind(" ")] + "..."
+        draw.rectangle([(ML, context_y + 2), (ML + 4, context_y + CONTEXT_SIZE - 2)], fill=accent)
+        draw.text((ML + 16, context_y), context, font=ctx_font, fill=OFF_WHITE)
 
-    divider_y = panel[3] - 68
-    draw.line((px, divider_y, panel[2] - 30, divider_y), fill=(255, 255, 255, 80), width=2)
+    footer_mid = IMAGE_HEIGHT - 95
+    logo_path = Path(__file__).parent.parent / "assets" / "logo.png"
+    logo_h = logo_w = 100
+    logo_right = ML
+    if logo_path.exists():
+        logo = Image.open(logo_path).convert("RGBA").resize((logo_w, logo_h), Image.LANCZOS)
+        logo_y = footer_mid - logo_h // 2
+        canvas.paste(logo, (ML, logo_y), logo.split()[3])
+        logo_right = ML + logo_w
+
+    div_x = logo_right + 20
+    div_y1 = footer_mid - 38
+    div_y2 = footer_mid + 38
+    for offset, alpha in ((2, 40), (1, 90), (0, 200)):
+        draw.rectangle([(div_x - offset, div_y1), (div_x + offset, div_y2)],
+                       fill=(*accent[:3], alpha))
+
     sources = [story.source_name]
     if story.corroborating_sources:
         extra = story.corroborating_sources[0].get("name", "")
         if extra and extra != story.source_name:
             sources.append(extra)
-    source_text = "SOURCE  •  " + " / ".join(s.upper() for s in sources[:2])
-    max_source_w = 700
-    while draw.textlength(source_text, font=source_font) > max_source_w and len(source_text) > 20:
-        source_text = source_text[:-4].rstrip() + "..."
-    draw.text((px, divider_y + 22), source_text, font=source_font, fill=OFF_WHITE)
-    date_text = datetime.now(timezone.utc).strftime("%d %b").upper()
-    date_w = draw.textlength(date_text, font=source_font)
-    draw.text((panel[2] - 30 - date_w, divider_y + 22), date_text,
-              font=source_font, fill=OFF_WHITE)
 
-    return canvas.convert("RGB")
+    src_x = div_x + 24
+    pri_font = _font("Montserrat-ExtraBold.ttf", SOURCE_SIZE + 4)
+    sec_font = _font("Montserrat-Medium.ttf", SOURCE_SIZE)
+    pri_h = SOURCE_SIZE + 4
+    total_h = pri_h + (8 + SOURCE_SIZE if len(sources) > 1 else 0)
+    sy = footer_mid - total_h // 2
+    pri_name = sources[0].upper()
+    src_max_w = IMAGE_WIDTH - MR - src_x - 20
+    while draw.textlength(pri_name, font=pri_font) > src_max_w and len(pri_name) > 4:
+        pri_name = pri_name[:-2].rstrip() + "."
+    draw.text((src_x, sy), pri_name, font=pri_font, fill=WHITE)
+    if len(sources) > 1:
+        draw.text((src_x, sy + pri_h + 8), sources[1].upper(), font=sec_font, fill=OFF_WHITE)
+
+    date_str = datetime.now(timezone.utc).strftime("%d %b %Y").upper()
+    date_font = _font("Montserrat-Bold.ttf", DATE_SIZE + 4)
+    date_w = int(draw.textlength(date_str, font=date_font))
+    draw.text((IMAGE_WIDTH - MR - date_w, footer_mid - (DATE_SIZE + 4) // 2),
+              date_str, font=date_font, fill=OFF_WHITE)
+    return canvas
 
 def _draw_rounded_rect(draw, x1, y1, x2, y2, radius, fill):
     """Fill a rounded rectangle (RGBA fill tuple)."""
