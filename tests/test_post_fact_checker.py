@@ -32,3 +32,11 @@ def test_accepts_grounded_caption():
         "Russia and North Korea opened their first road bridge. The bridge crosses the Tumen River between Rason and Khasan.",
     )
     assert result.passed
+
+
+def test_accepts_known_location_with_different_preposition():
+    result = check_generated_facts(
+        _story(),
+        "Cargo could travel to North Korea across the first road bridge.",
+    )
+    assert result.passed

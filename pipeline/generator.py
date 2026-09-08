@@ -87,10 +87,12 @@ def generate_post(story: Story) -> Story:
 
     last_error: Exception | None = None
     best_output: str = ""  # track best attempt so far
+    retry_reason = "previous generation was invalid"
 
     for attempt in range(1, MAX_GENERATION_RETRIES + 1):
         if attempt > 1:
-            logger.info("Retrying generation (attempt %d/%d) — previous output too short.", attempt, MAX_GENERATION_RETRIES)
+            logger.info("Retrying generation (attempt %d/%d) — %s.",
+                        attempt, MAX_GENERATION_RETRIES, retry_reason)
 
         prompt = _build_prompt(story)
 
@@ -122,6 +124,7 @@ def generate_post(story: Story) -> Story:
             if post_content and len(post_content) > len(best_output):
                 best_output = post_content
             last_error = GenerationError(f"LLM returned too little content ({len(post_content)} chars).")
+            retry_reason = "previous output was too short"
             continue
 
         # Good enough — accept it regardless of length
@@ -138,6 +141,7 @@ def generate_post(story: Story) -> Story:
         fact_check = check_generated_facts(story, post_content)
         if not fact_check.passed:
             last_error = GenerationError("Generated caption failed fact grounding: " + "; ".join(fact_check.issues[:4]))
+            retry_reason = "previous caption failed fact grounding"
             logger.warning("Caption fact-check failed (attempt %d/%d): %s", attempt, MAX_GENERATION_RETRIES, last_error)
             continue
 
@@ -147,19 +151,23 @@ def generate_post(story: Story) -> Story:
                     len(post_content), story.card_headline, " ".join(hashtags))
         return story
 
-    # All retries returned nothing — use the best partial output if available
-    if best_output and len(best_output) >= 40:
-        logger.warning(
-            "All %d attempts returned short content — using best partial output (%d chars).",
-            MAX_GENERATION_RETRIES, len(best_output),
-        )
-        hashtags = _generate_hashtags(story)
-        story.post_content  = _format_post(best_output, story)
-        story.hashtags      = hashtags
-        story.card_headline = _fallback_card_headline(story)
+    # Never lose a verified story because the writing model repeatedly chose a
+    # bad paraphrase. Build a conservative post entirely from source sentences.
+    logger.warning(
+        "All %d model attempts failed — using deterministic grounded caption.",
+        MAX_GENERATION_RETRIES,
+    )
+    story.card_headline = _fallback_card_headline(story)
+    story.card_description = None
+    story.post_content = _grounded_fallback_post(story)
+    story.hashtags = _generate_hashtags(story)
+    fallback_check = check_generated_facts(story, story.post_content)
+    if fallback_check.passed:
         return story
 
-    raise GenerationError(f"Post generation failed after {MAX_GENERATION_RETRIES} attempts: {last_error}")
+    raise GenerationError(
+        "Deterministic fallback failed fact grounding: " + "; ".join(fallback_check.issues[:4])
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -423,6 +431,40 @@ _QUESTION_FALLBACKS = [
     "Do you think this will make a difference? Let us know below 👇",
     "What's your take on this? Comment below 👇",
 ]
+
+
+def _grounded_fallback_post(story: Story) -> str:
+    """Build readable Facebook copy using exact sentences from verified evidence."""
+    evidence_blocks = [story.raw_summary or "", story.article_text or ""]
+    evidence_blocks.extend(
+        source.get("summary", "") for source in story.corroborating_sources or []
+    )
+    sentences: list[str] = []
+    seen: set[str] = set()
+    for block in evidence_blocks:
+        for sentence in re.split(r"(?<=[.!?])\s+|\n+", block):
+            sentence = re.sub(r"<[^>]+>", " ", sentence)
+            sentence = re.sub(r"\s+", " ", sentence).strip()
+            key = sentence.lower().rstrip(".!?")
+            if len(sentence.split()) < 6 or key in seen or sentence.endswith("?"):
+                continue
+            seen.add(key)
+            sentences.append(sentence.rstrip() if sentence.endswith((".", "!")) else sentence + ".")
+            if len(sentences) == 3:
+                break
+        if len(sentences) == 3:
+            break
+
+    context = sentences[0] if sentences else story.title
+    detail = "\n\n".join(sentences[1:])
+    sources = [story.source_name]
+    sources.extend(source.get("name", "") for source in story.corroborating_sources or [])
+    sources = list(dict.fromkeys(name for name in sources if name))
+    raw = f"{story.card_headline}\n{context}"
+    if detail:
+        raw += f"\n\n{detail}"
+    raw += f"\n\nWhat is your view on this development? 👇\n\n📰 Sources: {', '.join(sources)}"
+    return _format_post(raw, story)
 
 def _format_post(post: str, story: Story | None = None) -> str:
     """Build a card-matched two-line hook followed by a readable body."""

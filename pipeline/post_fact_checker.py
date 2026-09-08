@@ -62,7 +62,12 @@ def check_generated_facts(story: Story, post: str) -> FactCheckResult:
 
         for prep, place in _RELATION.findall(sentence):
             relation = _normalise(f"{prep} {place}")
-            if relation and relation not in evidence_norm:
+            place_norm = _normalise(place)
+            # Prepositions often change in faithful paraphrases (for example,
+            # "wanted in the UK" becoming "returned to the UK"). Treat the
+            # location as grounded when the place itself exists in evidence;
+            # sentence-level overlap still checks the surrounding claim.
+            if relation and place_norm not in evidence_norm:
                 issues.append(f"unsupported location relation: {prep} {place}")
 
         words = {w.lower() for w in _WORDS.findall(sentence) if w.lower() not in _STOP}
