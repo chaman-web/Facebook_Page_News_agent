@@ -152,6 +152,9 @@ def cluster_stories(stories: list[Story]) -> list[Story]:
         # Enrich primary story with cluster data
         primary.cluster_size = len(cluster)
         primary.confidence   = confidence
+        primary.priority_protected = any(
+            getattr(item, "priority_protected", False) for item in cluster
+        )
 
         # Build corroborating_sources from other cluster members
         corroborating = []

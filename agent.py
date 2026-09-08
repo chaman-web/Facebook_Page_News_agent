@@ -80,6 +80,7 @@ from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_pu
 from pipeline.editorial_scorer import EditorialTier, score_and_filter
 from pipeline.final_quality_check import FinalQualityError, final_quality_check
 from pipeline.generator import generate_post
+from pipeline.high_value_backlog import pending_stories, remember, resolve
 from pipeline.posting_queue import HARD_DAILY_CEILING, PostingQueue, Route
 from pipeline.selector import select_story
 from pipeline.clusterer import cluster_stories
@@ -171,6 +172,12 @@ def fetch_and_build(
     if not raw_stories:
         logger.warning("No stories returned from news sources.")
         return 0
+
+    pending = pending_stories()
+    if pending:
+        raw_urls = {story.source_url for story in raw_stories}
+        raw_stories.extend(story for story in pending if story.source_url not in raw_urls)
+        logger.info("Restored %d protected high-value candidate(s).", len(pending))
 
     logger.info("Fetched %d candidate stories total.", len(raw_stories))
     set_rss_pool(raw_stories)
@@ -268,6 +275,9 @@ def fetch_and_build(
     if not scored:
         logger.warning("All stories scored below 60. Nothing to queue.")
         return 0
+    for escore, story in scored:
+        if escore.total >= 80 or escore.impact_score >= 10:
+            remember(story, escore.total, escore.impact_score)
     logger.info(
         "Score distribution: %s",
         " | ".join(
@@ -378,7 +388,9 @@ def fetch_and_build(
                 from image.maker import create_news_image
                 image_path = create_news_image(story)
                 if not image_path:
-                    logger.warning("Image creation returned None — keeping story as a draft.")
+                    logger.warning("Image creation returned None — building branded fallback.")
+                    from image.maker import create_fallback_card
+                    image_path = create_fallback_card(story)
             except Exception as exc:
                 logger.warning("Image creation failed (%s) — building branded fallback.", exc)
                 try:
@@ -402,15 +414,13 @@ def fetch_and_build(
                 logger.info("\n%s", attn.scorecard())
                 tier_val = str(getattr(escore, "effective_tier_num", ""))
                 is_high  = (story.category or "").lower() in {"breaking", "war", "politics", "world", "crime"} or tier_val == "1"
-                if attn.verdict == "REGENERATE":
-                    logger.warning("⛔ Attention score %d/100 — REGENERATE. Skipping: %s", attn.total, story.title[:60])
-                    continue
-                elif attn.verdict == "IMPROVE":
-                    logger.warning("⚠️  Attention score %d/100 — IMPROVE. Skipping: %s", attn.total, story.title[:60])
-                    continue
+                if attn.verdict in {"REGENERATE", "IMPROVE"}:
+                    logger.warning(
+                        "Attention score %d/100 — improvement noted; story remains eligible.",
+                        attn.total,
+                    )
                 elif attn.verdict == "PUBLISH_IF_HIGH" and not is_high:
-                    logger.warning("⚠️  Attention score %d/100 (PUBLISH_IF_HIGH) — not high-priority. Skipping: %s", attn.total, story.title[:60])
-                    continue
+                    logger.info("Attention score %d/100 — continuing with mandatory card.", attn.total)
                 logger.info("✅ Attention score %d/100 — %s", attn.total, attn.verdict)
             except Exception as exc:
                 logger.warning("Attention score check failed (%s) — continuing.", exc)
@@ -492,6 +502,7 @@ def fetch_and_build(
                 )
                 record_published_title(story.title)
                 mark_seen(story, permanent=True)
+                resolve(story.source_url)
                 direct_published += 1
                 logger.info("✅ Published immediately [%.1f]: %s", escore.total, story.title[:60])
             except Exception as exc:
@@ -518,6 +529,7 @@ def fetch_and_build(
             card_headline  = getattr(story, "card_headline", None),
             hashtags       = getattr(story, "hashtags", None),
         )
+        resolve(story.source_url)
         added += 1
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")

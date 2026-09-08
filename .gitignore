@@ -10,6 +10,7 @@ env/
 drafts/
 seen_stories.json
 engagement_metrics.jsonl
+high_value_backlog.json
 .runtime-backups/
 
 # Python cache

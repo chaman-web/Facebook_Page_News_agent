@@ -100,6 +100,7 @@ SOURCE_HEALTH_PATH = PROJECT_ROOT / "source_health.json"
 SCORE_LOG_PATH = PROJECT_ROOT / "score_log.jsonl"
 RUN_LOG_PATH = PROJECT_ROOT / "run_log.jsonl"
 ENGAGEMENT_METRICS_PATH = PROJECT_ROOT / "engagement_metrics.jsonl"
+HIGH_VALUE_BACKLOG_PATH = PROJECT_ROOT / "high_value_backlog.json"
 IMAGES_DIR = PROJECT_ROOT / "images"
 LOGS_DIR = PROJECT_ROOT / "logs"
 

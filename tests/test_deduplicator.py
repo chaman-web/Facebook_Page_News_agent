@@ -95,6 +95,18 @@ class TestCheckDuplicate:
         with patch("config.SEEN_STORIES_PATH", str(seen_path)):
             check_duplicate(story)  # Must not raise
 
+    def test_protected_story_ignores_attempt_limit(self, tmp_path):
+        story = _story("Major emergency update", "https://example.com/high")
+        story.priority_protected = True
+        seen_path = _write_seen(tmp_path, {
+            "urls": [], "titles": [],
+            "url_attempts": {story.source_url: {"count": 9}},
+            "title_attempts": {story.title: {"count": 9}},
+        })
+
+        with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+            check_duplicate(story)
+
 
 class TestMarkSeen:
 

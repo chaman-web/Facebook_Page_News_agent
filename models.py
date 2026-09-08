@@ -52,6 +52,7 @@ class Story:
     article_text: str = ""
     article_image_url: str | None = None
     region: str = "global"
+    priority_protected: bool = False
 
     # --- Generation ---
     post_content: str | None = None

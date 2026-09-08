@@ -91,9 +91,11 @@ def _check_duplicate_in_state(story: Story, seen: dict, title_index: dict | None
                 f"Similar title ({ratio:.0%} match): '{story.title}' ≈ '{seen_title}'"
             )
 
+    protected = bool(getattr(story, "priority_protected", False))
+
     # 3. Attempt-tracked URL — block after MAX_ATTEMPTS
     url_attempts = seen.get("url_attempts", {})
-    if story.source_url in url_attempts:
+    if not protected and story.source_url in url_attempts:
         count = url_attempts[story.source_url]["count"]
         if count >= MAX_ATTEMPTS:
             raise DuplicateStory(
@@ -102,7 +104,7 @@ def _check_duplicate_in_state(story: Story, seen: dict, title_index: dict | None
 
     # 4. Attempt-tracked title similarity — block after MAX_ATTEMPTS
     title_attempts = seen.get("title_attempts", {})
-    for seen_title, seen_norm in _candidate_titles(norm, title_index, "attempts"):
+    for seen_title, seen_norm in ([] if protected else _candidate_titles(norm, title_index, "attempts")):
         entry = title_attempts[seen_title]
         ratio = SequenceMatcher(None, norm, seen_norm).ratio()
         if ratio >= config.DUPLICATE_TITLE_THRESHOLD:
