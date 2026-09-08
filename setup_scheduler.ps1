@@ -34,7 +34,8 @@ Register-ScheduledTask `
     -Trigger  $trigger1 `
     -Settings $settings1 `
     -RunLevel Highest `
-    -Force
+    -Force `
+    -ErrorAction Stop
 
 Write-Host "OK Job 1 registered - every 3 hours"
 
@@ -61,7 +62,8 @@ Register-ScheduledTask `
     -Trigger  $trigger2 `
     -Settings $settings2 `
     -RunLevel Highest `
-    -Force
+    -Force `
+    -ErrorAction Stop
 
 Write-Host "OK Job 2 registered - 13:00 / 18:00 / 00:00 PKT"
 Write-Host ""

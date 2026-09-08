@@ -86,10 +86,17 @@ from pipeline.selector import select_story
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
 
+_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+if "--fetch" in sys.argv:
+    _log_handlers.append(logging.FileHandler(config.LOGS_DIR / "job1_fetch.log", encoding="utf-8"))
+elif "--publish" in sys.argv:
+    _log_handlers.append(logging.FileHandler(config.LOGS_DIR / "job2_publish.log", encoding="utf-8"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
 
