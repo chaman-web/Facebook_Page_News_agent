@@ -9,24 +9,17 @@ Publishing philosophy:
   ROUTING LANES  (assigned at queue-entry time via route_story)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  🚨 PUBLISH_NOW   score ≥ 88  (Tier 1: ≥ 85)
+  🚨 PUBLISH_NOW   score ≥ 80
      Bypass interval, dead-hours, fatigue. Publish immediately.
      TTL: 2 hours. After that, downgrades to NEXT_SLOT.
      Token-bucket: minimum 10-min gap between two PUBLISH_NOW posts.
 
-  ⚡ NEXT_SLOT     score 75–87  (Tier 1: 60–84)
-     Publish at next available slot. 30-min minimum gap.
-     TTL: 6 hours. After that, downgrades to SCHEDULE.
-
-  📅 SCHEDULE      score 60–74  (Tier 1: 50–59)
+  📅 SCHEDULE      score 60–79
      Holds for the next scheduled window (00:00 / 13:00 / 18:00 local).
      Only the highest-scoring SCHEDULE story publishes per window slot.
      TTL: 12 hours.
 
-  🗂️  HOLD          score 50–59
-     Parked. Surfaces only on LOW_NEWS days. TTL: end of day.
-
-  🗑️  REJECT        score < 50
+  🗑️  REJECT        score < 60
      Dropped. Never enters the queue.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -88,7 +81,7 @@ WINDOW_TOLERANCE_MINUTES = 15
 # Score thresholds — the routing table
 # ---------------------------------------------------------------------------
 
-SCORE_PUBLISH_NOW = 88.0
+SCORE_PUBLISH_NOW = 80.0
 SCORE_NEXT_SLOT   = 75.0
 SCORE_SCHEDULE    = 60.0
 SCORE_HOLD        = 50.0
@@ -186,17 +179,10 @@ def route_story(score: float, tier: int) -> Route:
         50–59       SCHEDULE        HOLD
         < 50        REJECT          REJECT
     """
-    if score >= SCORE_PUBLISH_NOW:
-        return Route.PUBLISH_NOW
-    if tier == 1:
-        if score >= TIER1_PUBLISH_NOW:   return Route.PUBLISH_NOW
-        if score >= TIER1_NEXT_SLOT:     return Route.NEXT_SLOT
-        if score >= SCORE_HOLD:          return Route.SCHEDULE
-        return Route.REJECT
-    # Tier 2/3
-    if score >= SCORE_NEXT_SLOT:         return Route.NEXT_SLOT
-    if score >= SCORE_SCHEDULE:          return Route.SCHEDULE
-    if score >= SCORE_HOLD:              return Route.HOLD
+    # Simple editorial routing: high value goes now, moderate waits for the
+    # next scheduled window, low value never enters the queue.
+    if score >= SCORE_PUBLISH_NOW:        return Route.PUBLISH_NOW
+    if score >= SCORE_SCHEDULE:           return Route.SCHEDULE
     return Route.REJECT
 
 
@@ -518,6 +504,41 @@ class PostingQueue:
             f"Published to Facebook [{entry.route}]",
         )
         self._save()
+
+    def record_direct_publish(
+        self,
+        story: Story,
+        score: float,
+        effective_tier: int,
+        image_path: Path,
+        post_id: str,
+    ) -> None:
+        """Record an immediate post as history without first queueing it."""
+        entry = next(
+            (item for item in self._entries if item.source_url == story.source_url),
+            None,
+        )
+        if entry is None:
+            entry = QueueEntry(
+                title=story.title,
+                source_name=story.source_name,
+                source_url=story.source_url,
+                category=story.category,
+                score=score,
+                queued_at=datetime.now(timezone.utc).isoformat(),
+                is_breaking=True,
+                category_tier=effective_tier,
+                route=Route.PUBLISH_NOW.value,
+                image_path=str(image_path),
+                post_content=story.post_content,
+                card_headline=story.card_headline,
+                hashtags=story.hashtags,
+                verification_status=story.verification_status.value,
+                verification_score=float(story.verification_score or 0.0),
+                verification_reason=story.verification_reason or "",
+            )
+            self._entries.append(entry)
+        self.mark_published(entry, post_id=post_id)
 
     def mark_skipped(self, entry: QueueEntry, reason: str = "") -> None:
         entry.status = "SKIPPED"

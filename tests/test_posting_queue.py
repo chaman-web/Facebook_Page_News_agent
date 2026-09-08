@@ -7,7 +7,14 @@ from unittest.mock import patch
 os.environ.setdefault("NEWSAPI_KEY", "test-key")
 
 from models import Story, VerificationStatus  # noqa: E402
-from pipeline.posting_queue import PostingQueue, QueueEntry, Route  # noqa: E402
+from pipeline.posting_queue import PostingQueue, QueueEntry, Route, route_story  # noqa: E402
+
+
+def test_routing_is_immediate_moderate_or_reject():
+    assert route_story(80, 3) == Route.PUBLISH_NOW
+    assert route_story(79.9, 1) == Route.SCHEDULE
+    assert route_story(60, 3) == Route.SCHEDULE
+    assert route_story(59.9, 1) == Route.REJECT
 
 
 def test_expire_stale_persists_all_required_downgrades(tmp_path):

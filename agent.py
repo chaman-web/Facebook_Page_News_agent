@@ -462,18 +462,54 @@ def fetch_and_build(
     if expired:
         logger.info("⬇️  %d queue entries expired or downgraded (TTL).", expired)
 
+    immediate_posts = [
+        item for item in ready_posts
+        if item[0].total >= 80 or item[0].impact_score >= 10
+    ]
+    scheduled_posts = [item for item in ready_posts if item not in immediate_posts]
+
     if dry_run:
         logger.info("── DRY RUN: Pipeline preview ───────────────────")
         for i, (escore, story, _) in enumerate(ready_posts, 1):
             icon = "🔴" if escore.tier.value == "PRIORITY / BREAKING" else \
                    "🟠" if escore.tier.value == "HIGH PRIORITY" else \
                    "🟢" if escore.tier.value == "PUBLISH" else "🟡"
-            logger.info("%s [DRY RUN] %d. [%.1f — %s] %s [%s]",
-                icon, i, escore.total, escore.tier.value, story.title[:60], story.source_name)
+            action = "PUBLISH IMMEDIATELY" if (escore.total >= 80 or escore.impact_score >= 10) else "NEXT SCHEDULE"
+            logger.info("%s [DRY RUN] %d. [%s | %.1f] %s [%s]",
+                icon, i, action, escore.total, story.title[:60], story.source_name)
         return 0
 
+    direct_published = 0
+    direct_failed = 0
+    if immediate_posts:
+        from facebook.publisher import publish_post_with_image
+        for escore, story, image_path in immediate_posts:
+            try:
+                post_id = publish_post_with_image(story, Path(image_path))
+                queue.record_direct_publish(
+                    story, escore.total, escore.effective_tier_num,
+                    Path(image_path), post_id,
+                )
+                record_published_title(story.title)
+                mark_seen(story, permanent=True)
+                direct_published += 1
+                logger.info("✅ Published immediately [%.1f]: %s", escore.total, story.title[:60])
+            except Exception as exc:
+                # Preserve the story for an automatic retry if Facebook is
+                # temporarily unavailable; normal high-value flow never waits.
+                logger.error("Immediate publish failed; queued for retry: %s", exc)
+                queue.add(
+                    story, escore.total,
+                    effective_tier=escore.effective_tier_num,
+                    image_path=image_path,
+                    post_content=story.post_content,
+                    card_headline=story.card_headline,
+                    hashtags=story.hashtags,
+                )
+                direct_failed += 1
+
     added = 0
-    for escore, story, image_path in ready_posts:
+    for escore, story, image_path in scheduled_posts:
         queue.add(
             story, escore.total,
             effective_tier = escore.effective_tier_num,
@@ -486,8 +522,8 @@ def fetch_and_build(
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info(
-        "Fetch & Build done. %d verified posts added to queue; %d provisional drafts saved.",
-        added, review_drafts,
+        "Fetch & Build done. %d published immediately; %d scheduled; %d immediate retries; %d provisional drafts.",
+        direct_published, added, direct_failed, review_drafts,
     )
     logger.info("Queue: %s", queue.summary())
 
