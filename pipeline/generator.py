@@ -62,6 +62,7 @@ def generate_post(story: Story) -> Story:
     """
     from openai import OpenAIError
     from pipeline.card_headline import select_card_headline
+    from pipeline.card_description import select_card_description
     from pipeline.post_fact_checker import check_generated_facts
 
     MAX_GENERATION_RETRIES = 3
@@ -132,6 +133,7 @@ def generate_post(story: Story) -> Story:
 
         hashtags = _generate_hashtags(story)
         story.card_headline = select_card_headline(story, raw_output)
+        story.card_description = select_card_description(story, raw_output)
         post_content = _format_post(post_content, story)
         fact_check = check_generated_facts(story, post_content)
         if not fact_check.passed:
@@ -284,6 +286,12 @@ BAD (vague): "PAKISTAN REJECTS INDIA BASELESS CLAIMS ON OCCUPIED"
 GOOD: "PAKISTAN REJECTS INDIA'S KASHMIR CLAIMS"
 
 Write three punchy complete statements, not truncated titles.>
+
+CARD_DESCRIPTION:
+<Write one complete sentence of 7–18 words. It must add the strongest verified
+consequence or key detail, remain clearly relevant to the same story, and be
+different from all card headlines. Do not repeat the title, ask a question,
+use clickbait, or introduce any fact absent from the supplied evidence.>
 
 POST:
 <your full Facebook post text here>

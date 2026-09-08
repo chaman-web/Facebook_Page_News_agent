@@ -81,6 +81,8 @@ def _write_json(story: Story, path: Path) -> None:
         "article_text": story.article_text,
         "article_image_url": story.article_image_url,
         "post_content": story.post_content,
+        "card_headline": story.card_headline,
+        "card_description": story.card_description,
         "hashtags": story.hashtags,
         "draft_status": story.draft_status.value,
         "rejection_reason": story.rejection_reason,

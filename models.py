@@ -57,6 +57,7 @@ class Story:
     # --- Generation ---
     post_content: str | None = None
     card_headline: str | None = None   # short punchy headline for the image card
+    card_description: str | None = None  # distinct, grounded detail shown above the logo
     hashtags: list[str] = field(default_factory=list)
     category: str = "breaking"  # news category slug
 

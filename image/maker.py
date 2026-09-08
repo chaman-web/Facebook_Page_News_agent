@@ -925,6 +925,9 @@ def _strip_html(text: str) -> str:
 
 def _context_line(story: Story) -> str:
     """Choose a grounded consequence or key detail that does not repeat the title."""
+    if getattr(story, "card_description", None):
+        return story.card_description
+
     evidence = [story.raw_summary or "", story.article_text or ""]
     if story.post_content:
         evidence.insert(0, story.post_content)
