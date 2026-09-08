@@ -130,7 +130,8 @@ def generate_post(story: Story) -> Story:
                 len(post_content),
             )
 
-        hashtags     = _generate_hashtags(story)
+        hashtags = _generate_hashtags(story)
+        story.card_headline = select_card_headline(story, raw_output)
         post_content = _format_post(post_content, story)
         fact_check = check_generated_facts(story, post_content)
         if not fact_check.passed:
@@ -140,7 +141,6 @@ def generate_post(story: Story) -> Story:
 
         story.post_content  = post_content
         story.hashtags      = hashtags
-        story.card_headline = select_card_headline(story, raw_output)
         logger.info("Post generated (%d chars). Card: %s | Hashtags: %s",
                     len(post_content), story.card_headline, " ".join(hashtags))
         return story
@@ -247,9 +247,9 @@ FORMATTING RULES (follow exactly):
 - Use 1-2 relevant emojis per paragraph as visual anchors — not decoration.
 - End with a direct QUESTION to the audience. This is mandatory.
 
-FIRST LINE IS CRITICAL — THE HOOK:
-Facebook shows only the first 2-3 lines before "See more". These lines must STOP THE SCROLL.
-Line 1: A LABEL + the single most striking fact. Format: [LABEL] 🔴/📌/⚡ + ONE punchy sentence under 12 words.
+FIRST TWO LINES ARE CRITICAL — THE HOOK:
+Facebook commonly shows only the opening lines before "See more". Make both lines specific and compelling.
+Line 1: Begin with exactly ONE relevant symbol, then the strongest verified fact in under 12 words.
          Examples:
          "🔴 BREAKING: Amazon cargo plane crashes at Miami airport — 5 dead."
          "⚡ JUST IN: Germany's far-right AfD wins landslide in eastern states."
@@ -385,14 +385,16 @@ VERIFICATION: {verification_note}{corroborating_text}
 ALL SOURCES TO CITE: {', '.join(unique_source_names)}
 CATEGORY EMOJI: {cat_emoji}
 
-MANDATORY FIRST LINE — start the post with this exact label format:
-"{hook_label}: [most striking fact from this story in under 12 words]"
+MANDATORY OPENING:
+Line 1 starts with exactly one symbol and the strongest verified fact.
+Line 2 explains the immediate consequence or why the fact matters.
+Do not place a blank line between these two lines. Do not add extra symbols to them.
 
 Example for this story:
 "{hook_label}: {story.title[:60]}{'...' if len(story.title) > 60 else ''}"
 
 The post MUST follow this structure:
-LINE 1: {hook_label}: [single most striking fact — under 12 words]
+LINE 1: {cat_emoji} [single most striking verified fact — under 12 words]
 LINE 2: [what it means or why it matters — one sentence]
 LINE 3 (optional): [one key detail or number that adds weight]
 [BLANK LINE]
@@ -415,103 +417,51 @@ _QUESTION_FALLBACKS = [
 ]
 
 def _format_post(post: str, story: Story | None = None) -> str:
-    """
-    1. Ensure the post starts with a label+hook line.
-    2. Ensure blank lines between paragraphs (max 3 sentences per paragraph).
-    3. Ensure the post ends with an engagement question.
-    """
-    import random
-
-    # --- Enforce hook label on first line ---
-    if story is not None:
-        category = getattr(story, "category", "breaking")
-        age_h    = (datetime.now(timezone.utc) - story.published_at).total_seconds() / 3600
-
-        if category == "breaking" or age_h < 2:
-            label = "🔴 BREAKING"
-        elif category == "war":
-            label = "⚔️ WAR UPDATE"
-        elif category == "politics":
-            label = "🏛️ POLITICS"
-        elif category == "technology":
-            label = "📱 TECH"
-        elif category == "business":
-            label = "💼 BUSINESS"
-        elif category == "sports":
-            label = "🏆 SPORTS"
-        elif category == "crime":
-            label = "🚨 CRIME"
-        elif category == "climate":
-            label = "🌿 CLIMATE"
-        elif category == "science":
-            label = "🔬 SCIENCE"
-        elif category == "entertainment":
-            label = "🎬 ENTERTAINMENT"
-        elif category == "wellness":
-            label = "💪 HEALTH"
-        elif category == "jobs":
-            label = "💼 JOBS"
-        elif age_h < 6:
-            label = "⚡ JUST IN"
-        else:
-            label = "🌍 WORLD"
-
-        first_line = post.lstrip().split("\n")[0]
-        label_patterns = ["🔴", "⚡", "📌", "🌍", "⚔️", "🏛️", "📱", "💼", "🏆",
-                          "🚨", "🌿", "🔬", "🎬", "💪", "BREAKING", "JUST IN",
-                          "WORLD", "DEVELOPING", "UPDATE"]
-        has_label = any(p in first_line for p in label_patterns)
-
-        if not has_label:
-            # Build a short hook from the title
-            title_words = story.title.split()
-            short_hook  = " ".join(title_words[:10]) + ("..." if len(title_words) > 10 else "")
-            hook_line   = f"{label}: {short_hook}"
-            post        = hook_line + "\n\n" + post.lstrip()
-
-    # --- Collapse excess blank lines first ---
+    """Build a card-matched two-line hook followed by a readable body."""
     post = re.sub(r"\n{3,}", "\n\n", post.strip())
+    if story is None:
+        return post
 
-    # --- Split into paragraphs ---
-    paragraphs = [p.strip() for p in post.split("\n\n") if p.strip()]
+    symbol = _CATEGORY_EMOJI.get(getattr(story, "category", "world"), "🌍")
+    card = (story.card_headline or _fallback_card_headline(story)).strip()
+    card = re.sub(r"^[^A-Za-z0-9]+", "", card).strip()
+    hook_line = f"{symbol} {card}"
 
-    split_paragraphs: list[str] = []
-    for para in paragraphs:
-        sentences = re.split(r"(?<=[.!?])\s+", para)
-        chunk: list[str] = []
-        for sentence in sentences:
-            chunk.append(sentence)
-            if len(chunk) >= 3:
-                split_paragraphs.append(" ".join(chunk))
-                chunk = []
-        if chunk:
-            split_paragraphs.append(" ".join(chunk))
+    lines = [line.strip() for line in post.splitlines() if line.strip()]
+    cleaned_lines: list[str] = []
+    for line in lines:
+        line = re.sub(r"^[^A-Za-z0-9]+", "", line).strip()
+        line = re.sub(
+            r"^(?:BREAKING|JUST IN|DEVELOPING|WORLD|WAR UPDATE|POLITICS|TECH|BUSINESS|SPORTS|CRIME|CLIMATE|SCIENCE|ENTERTAINMENT|HEALTH|JOBS)\s*:\s*",
+            "", line, flags=re.I,
+        ).strip()
+        if line:
+            cleaned_lines.append(line)
 
-    # --- Ensure closing question ---
-    last = split_paragraphs[-1] if split_paragraphs else ""
-    tail = " ".join(split_paragraphs[-2:]) if len(split_paragraphs) >= 2 else last
-    has_question = "?" in tail or "👇" in tail
-    if not has_question:
-        split_paragraphs.append(random.choice(_QUESTION_FALLBACKS))
+    # The generated first line is usually another headline. Use the next
+    # grounded sentence as the consequence/context line.
+    context_candidates = cleaned_lines[1:] or cleaned_lines
+    context = next(
+        (line for line in context_candidates
+         if not line.lower().startswith(("sources:", "source:"))
+         and "?" not in line
+         and line.lower() not in card.lower()
+         and card.lower() not in line.lower()),
+        "",
+    )
+    if not context:
+        context = (story.raw_summary or story.title).split(".")[0].strip()
 
-    # --- HOOK BLOCK: first 2 paragraphs joined with single \n (no blank line) ---
-    # Facebook shows ~2-3 lines before "See more". A blank line eats one of those
-    # visible lines. Pack the hook + context tight so both show before the cut.
-    if len(split_paragraphs) >= 2:
-        hook_block = split_paragraphs[0] + "\n" + split_paragraphs[1]
-        body       = split_paragraphs[2:]
-        return hook_block + ("\n\n" + "\n\n".join(body) if body else "")
-    else:
-        return "\n\n".join(split_paragraphs)
+    body_lines = [line for line in cleaned_lines if line != context]
+    if body_lines and body_lines[0].lower() in card.lower():
+        body_lines.pop(0)
+    body = "\n\n".join(body_lines)
+    tail = f"{context} {body}"
+    if "?" not in tail and "👇" not in tail:
+        body = (body + "\n\n" if body else "") + _QUESTION_FALLBACKS[0]
 
-    # --- Ensure closing question ---
-    last = split_paragraphs[-1] if split_paragraphs else ""
-    tail = " ".join(split_paragraphs[-2:]) if len(split_paragraphs) >= 2 else last
-    has_question = "?" in tail or "👇" in tail
-    if not has_question:
-        split_paragraphs.append(random.choice(_QUESTION_FALLBACKS))
-
-    return "\n\n".join(split_paragraphs)
+    opening = f"{hook_line}\n{context}"
+    return opening + (f"\n\n{body}" if body else "")
 
 
 # ---------------------------------------------------------------------------

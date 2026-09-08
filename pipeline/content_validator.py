@@ -120,14 +120,15 @@ def validate_post(story: Story) -> Story:
     # If fewer than 2 key terms from the headline appear in the post, the reader
     # sees a card about topic A but post text about topic B — confusing.
     # Fix: prepend a clear context sentence using the headline and source.
-    headline_terms = _key_terms(story.title)
+    headline_text  = story.card_headline or story.title
+    headline_terms = _key_terms(headline_text)
     post_terms     = _key_terms(post)
     overlap        = headline_terms & post_terms
     required       = max(2, int(len(headline_terms) * 0.35))   # at least 35% of headline terms
 
     if len(overlap) < required and len(headline_terms) >= 3:
         context_sentence = (
-            f"📌 {story.title} — via {story.source_name}.\n\n"
+            f"📌 {headline_text} — via {story.source_name}.\n\n"
         )
         story.post_content = context_sentence + post
         post = story.post_content

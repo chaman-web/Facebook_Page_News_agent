@@ -56,22 +56,8 @@ def _clean_text(text: str) -> str:
 
 
 def _format_post(post_content: str, hashtags: list[str]) -> str:
-    """
-    Format the final Facebook post:
-    - Headline on first line with red dot emoji + UPPERCASE for visual emphasis
-    - Body as normal text
-    - Hashtags appended at the end
-    """
-    lines = [l for l in post_content.strip().splitlines() if l.strip()]
-    if not lines:
-        return post_content
-
-    headline = "BREAKING: " + lines[0].strip()
-    body = "\n".join(lines[1:]).strip()
-
-    message = headline
-    if body:
-        message = f"{headline}\n\n{body}"
+    """Preserve the generated two-line hook and append missing hashtags."""
+    message = post_content.strip()
 
     if hashtags:
         hashtag_line = " ".join(hashtags)
