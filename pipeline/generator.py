@@ -61,6 +61,7 @@ def generate_post(story: Story) -> Story:
     - Hashtags always generated deterministically
     """
     from openai import OpenAIError
+    from pipeline.card_headline import select_card_headline
     from pipeline.post_fact_checker import check_generated_facts
 
     MAX_GENERATION_RETRIES = 3
@@ -139,8 +140,7 @@ def generate_post(story: Story) -> Story:
 
         story.post_content  = post_content
         story.hashtags      = hashtags
-        story.card_headline = (_parse_card_headline(raw_output)
-                               or _fallback_card_headline(story))
+        story.card_headline = select_card_headline(story, raw_output)
         logger.info("Post generated (%d chars). Card: %s | Hashtags: %s",
                     len(post_content), story.card_headline, " ".join(hashtags))
         return story
@@ -262,8 +262,14 @@ At the very end of the post, always include:
 📰 Sources: <comma-separated source names>
 
 Output format (return exactly this structure, nothing else):
-CARD_HEADLINE:
-<newspaper front-page splash — max 7 words, ALL CAPS, active voice. Must be a COMPLETE thought that stands alone. Never cut off mid-phrase. Use the most dramatic fact: numbers, death toll, country, key verb.
+CARD_HEADLINES:
+<Write exactly 3 alternative card headlines, numbered 1–3. Each must be 4–9 words, active voice, a complete thought, and understandable in one second on a phone.
+
+1. FACT-LED: lead with the strongest verified fact or number.
+2. IMPACT-LED: show who is affected or why the update matters.
+3. ACTION-LED: lead with the main person/country and strongest accurate verb.
+
+Use only details explicitly present in the supplied evidence. Prefer a specific person, country, number, or consequence. Never use questions, teasers, vague pronouns, unsupported adjectives, or clickbait such as SHOCKING and YOU WON'T BELIEVE.
 
 BAD (cut off): "75% OF A&E STAFF IN UK FACE"
 GOOD: "75% OF NHS STAFF FACE DAILY VIOLENCE"
@@ -277,7 +283,7 @@ GOOD: "6 DEAD AS DELHI BUILDING COLLAPSES"
 BAD (vague): "PAKISTAN REJECTS INDIA BASELESS CLAIMS ON OCCUPIED"
 GOOD: "PAKISTAN REJECTS INDIA'S KASHMIR CLAIMS"
 
-Write the headline as a punchy complete statement, not a truncated title.>
+Write three punchy complete statements, not truncated titles.>
 
 POST:
 <your full Facebook post text here>
