@@ -109,6 +109,21 @@ def _select_verified_and_provisional(items: list, per_lane: int) -> list:
     return verified[:per_lane] + provisional[:per_lane]
 
 
+def _preserve_high_impact(scored: list, selected: list) -> list:
+    """Keep every consequential update even when a category quota is full."""
+    selected_urls = {item[1].source_url for item in selected}
+    protected = [
+        item for item in scored
+        if item[0].impact_score >= 10 and item[1].source_url not in selected_urls
+    ]
+    if protected:
+        logger.info(
+            "Impact protection retained %d additional high-impact candidate(s).",
+            len(protected),
+        )
+    return selected + protected
+
+
 # ---------------------------------------------------------------------------
 # JOB 1 — Fetch & Build (fills the queue)
 # ---------------------------------------------------------------------------
@@ -280,6 +295,8 @@ def fetch_and_build(
         ]
     else:
         selected_scored = _select_verified_and_provisional(scored, count)
+
+    selected_scored = _preserve_high_impact(scored, selected_scored)
 
     selected_verified = sum(
         1 for _, story in selected_scored

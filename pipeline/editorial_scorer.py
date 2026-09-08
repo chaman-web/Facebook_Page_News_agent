@@ -75,6 +75,8 @@ class EditorialScore:
     reason:               str
     effective_tier_num:   int     = 2   # actual tier used (may differ from category default)
     tier_was_overridden:  bool    = False
+    impact_score:         float   = 0.0
+    impact_reasons:       tuple[str, ...] = ()
 
     def is_publishable(self) -> bool:
         return self.tier != EditorialTier.REJECT
@@ -315,6 +317,54 @@ _TIER1_OVERRIDE_SIGNALS = [
     (r"\b(historic|unprecedented|first time in history|record-breaking)\b", r"\b(war|peace|crisis|disaster|election)\b"),
 ]
 
+# Impact is deliberately separate from engagement language.  A story can be
+# high impact without words such as "breaking" or "shocking".
+_IMPACT_DIMENSIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("mass-casualty", (
+        r"\b(?:\d{2,}|dozens?|scores?|hundreds?|thousands?)\s+(?:people\s+)?(?:dead|killed|injured|missing|displaced)",
+        r"\b(?:kills?|injures?|leaves)\s+(?:at least\s+)?(?:\d{2,}|dozens?|scores?|hundreds?|thousands?)\b",
+        r"\bmass (?:casualty|shooting|evacuation)\b",
+    )),
+    ("major-disaster", (
+        r"\b(?:earthquake|tsunami|cyclone|hurricane|typhoon|flood|wildfire|volcanic eruption)\b.{0,100}\b(?:emergency|evacuat|destroy|devastat|dead|killed|missing)",
+        r"\b(?:emergency|evacuat|destroy|devastat|dead|killed|missing)\b.{0,100}\b(?:earthquake|tsunami|cyclone|hurricane|typhoon|flood|wildfire|volcanic eruption)\b",
+    )),
+    ("conflict-escalation", (
+        r"\b(?:invasion|coup|ceasefire|missile strike|airstrike|declares war|mobilization|nuclear threat)\b",
+        r"\b(?:war|conflict)\b.{0,100}\b(?:escalat|offensive|troops|border|ceasefire|peace deal)",
+    )),
+    ("government-leadership", (
+        r"\b(?:president|prime minister|government)\b.{0,90}\b(?:resigns?|removed|ousted|dies|assassinated|impeached|dissolved)",
+        r"\b(?:election results?|wins? election|state of emergency|martial law|constitutional crisis)\b",
+    )),
+    ("population-policy", (
+        r"\b(?:government|parliament|supreme court|central bank)\b.{0,120}\b(?:approves?|passes?|bans?|orders?|cuts?|raises?|announces?)\b.{0,80}\b(?:tax|tariff|interest rate|border|visa|citizenship|subsid|minimum wage|currency)",
+        r"\b(?:nationwide|millions? of people|entire country|across the country)\b.{0,120}\b(?:law|ban|shutdown|strike|outage|shortage|evacuat)",
+    )),
+    ("systemic-economy", (
+        r"\b(?:currency|banking|stock market|economy|debt)\b.{0,100}\b(?:collapse|crash|default|emergency|record low|bailout)",
+        r"\b(?:recession|sovereign default|bank run|capital controls|trade war)\b",
+    )),
+    ("public-health", (
+        r"\b(?:outbreak|epidemic|pandemic|public health emergency)\b.{0,100}\b(?:deaths?|cases?|spreads?|who|world health organization)",
+        r"\b(?:who|world health organization)\b.{0,100}\b(?:emergency|outbreak|pandemic|epidemic)",
+    )),
+    ("critical-infrastructure", (
+        r"\b(?:nationwide|major|massive)\b.{0,60}\b(?:blackout|power outage|internet outage|cyberattack|airport closure|water shortage)",
+        r"\b(?:cyberattack|blackout|outage)\b.{0,100}\b(?:hospital|airport|power grid|banking|government systems?)",
+    )),
+)
+
+
+def assess_high_impact(text: str) -> tuple[float, tuple[str, ...]]:
+    """Return a 0–20 societal-impact score and matched dimensions."""
+    matched = tuple(
+        label
+        for label, patterns in _IMPACT_DIMENSIONS
+        if any(re.search(pattern, text, re.IGNORECASE) for pattern in patterns)
+    )
+    return min(20.0, float(len(matched) * 5)), matched
+
 def _detect_tier_override(text: str, category: str) -> int | None:
     """
     Check if a story from Tier 2 or Tier 3 should be promoted to Tier 1.
@@ -351,6 +401,7 @@ def score_story(story: Story) -> EditorialScore:
     source_credibility = _score_source_credibility(story)
     freshness          = _score_freshness(story.published_at, text)
     visual_potential   = _score_visual_potential(text)
+    impact_score, impact_reasons = assess_high_impact(text)
 
     raw_total = (
         news_value + breaking_urgency + audience_interest
@@ -363,6 +414,8 @@ def score_story(story: Story) -> EditorialScore:
     # --- Feature #2: story-level tier override ---
     # A Tier 2/3 story with breaking signals gets promoted to Tier 1
     override = _detect_tier_override(text, category)
+    if impact_score >= 10 and tier_num > 1:
+        override = 1
     if override == 1:
         original_tier = tier_num
         tier_num   = 1
@@ -384,6 +437,18 @@ def score_story(story: Story) -> EditorialScore:
 
     total = min(total, 100.0)
 
+    # Protect consequential updates from keyword/category bias. Verification is
+    # still a separate mandatory gate, and only established sources receive the
+    # floor, so this cannot turn an unverified claim into an automatic post.
+    source_tier_num = int(getattr(story, "source_tier", 4) or 4)
+    if source_tier_num <= 3:
+        if impact_score >= 15:
+            total = max(total, 90.0)
+        elif impact_score >= 10:
+            total = max(total, 82.0)
+        elif impact_score >= 5:
+            total = max(total, 72.0)
+
     tier  = _classify_tier(total)
 
     reason = _build_reason(
@@ -395,6 +460,11 @@ def score_story(story: Story) -> EditorialScore:
     verification_value = getattr(verification, "value", str(verification))
     verification_score = float(getattr(story, "verification_score", 0.0) or 0.0)
     reason += f" | Verification {verification_value} {verification_score:.0f}/100 (separate gate)"
+    if impact_reasons:
+        reason += f" | Impact {impact_score:.0f}/20: {', '.join(impact_reasons)}"
+    region = getattr(story, "region", "global")
+    if region != "global":
+        reason += f" | Region {region}"
 
     score = EditorialScore(
         story_title          = title,
@@ -410,6 +480,8 @@ def score_story(story: Story) -> EditorialScore:
         reason               = reason,
         effective_tier_num   = tier_num,
         tier_was_overridden  = (override == 1),
+        impact_score         = impact_score,
+        impact_reasons       = impact_reasons,
     )
 
     _log_score(score)

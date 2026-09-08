@@ -51,6 +51,7 @@ class Story:
     verification_evidence: list[dict] = field(default_factory=list)
     article_text: str = ""
     article_image_url: str | None = None
+    region: str = "global"
 
     # --- Generation ---
     post_content: str | None = None

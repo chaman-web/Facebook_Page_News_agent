@@ -218,6 +218,9 @@ TIER2_DOMAINS: set[str] = {
     "cbc.ca",
     "irishtimes.com",
     "rte.ie",
+    "arabnews.com",
+    "dailysabah.com",
+    "africanews.com",
 }
 
 TIER2_NAME_FRAGMENTS: set[str] = {

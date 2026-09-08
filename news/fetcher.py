@@ -6,10 +6,9 @@ Sources (used in parallel, not fallback-only):
   2. RSS feeds (multiple per category)
 
 Source health tracking:
-  - If a feed returns rate-limit error → banned for 12h automatically
-  - If a feed returns >= 80% duplicate stories → banned for 12h
-  - If a feed fails (timeout, parse error) → banned for 12h
-  - Banned sources are skipped automatically, tried again after 12h
+  - A single timeout or HTTP error does not remove a source
+  - Three consecutive failures trigger a one-hour cool-off
+  - A successful response clears the failure streak
 
 Always fetches a large pool then returns freshest `limit` stories.
 """
@@ -24,7 +23,8 @@ import requests
 
 import config
 from models import NewsSourceError, Story
-from pipeline.source_health import ban, is_banned, record_duplicates
+from pipeline.source_health import is_banned, record_failure, record_success
+from news.regional_sources import REGIONAL_FEEDS, discovery_priority, is_region_relevant
 
 logger = logging.getLogger(__name__)
 
@@ -290,7 +290,11 @@ CATEGORIES: dict[str, dict] = {
 # Public interface
 # ---------------------------------------------------------------------------
 
-def fetch_news(limit: int = 5, category: str = "breaking") -> list[Story]:
+def fetch_news(
+    limit: int = 5,
+    category: str = "breaking",
+    include_regional: bool = True,
+) -> list[Story]:
     """
     Fetch `limit` fresh stories for the given category.
     - Pulls from NewsAPI + all healthy RSS feeds simultaneously
@@ -303,6 +307,7 @@ def fetch_news(limit: int = 5, category: str = "breaking") -> list[Story]:
 
     pool: list[Story] = []
     seen_urls: set[str] = set()
+    regional_candidates: list[Story] = []
 
     def _add(stories: list[Story]) -> int:
         added = 0
@@ -332,20 +337,25 @@ def fetch_news(limit: int = 5, category: str = "breaking") -> list[Story]:
             continue
         try:
             rss_stories = _parse_rss_feed(feed_url, limit=10)
+            record_success(feed_url)
             if not rss_stories:
                 continue
             before = len(pool)
             added  = _add(rss_stories)
             rss_total += added
-            # Track duplicate ratio for this feed
-            fetched    = len(rss_stories)
-            duplicates = fetched - added
-            record_duplicates(feed_url, fetched, duplicates)
         except Exception as exc:
-            ban(feed_url, f"Fetch error: {type(exc).__name__}: {str(exc)[:120]}")
+            record_failure(feed_url, f"Fetch error: {type(exc).__name__}: {str(exc)[:120]}")
 
     if rss_total:
         logger.info("RSS feeds added %d new stories for '%s'.", rss_total, cat["label"])
+
+    # A direct breaking/world run must still cover every macro-region.  The
+    # all-category path performs this sweep once after its category passes.
+    if include_regional and category in {"breaking", "world"}:
+        regional_candidates = fetch_regional_news(
+            limit_per_region=min(max(2, limit // 10), 5)
+        )
+        _add(regional_candidates)
 
     if not pool:
         raise NewsSourceError(f"No stories retrieved for category '{cat['label']}'.")
@@ -359,7 +369,15 @@ def fetch_news(limit: int = 5, category: str = "breaking") -> list[Story]:
         "Total pool for '%s': %d stories. Returning top %d.",
         cat["label"], len(pool), min(fetch_limit, len(pool))
     )
-    return pool[:fetch_limit]
+    result = pool[:fetch_limit]
+    result_urls = {story.source_url for story in result}
+    # Keep the regional quota even when a burst of newer US/UK headlines fills
+    # the global freshness window.
+    result.extend(
+        story for story in regional_candidates
+        if story.source_url not in result_urls
+    )
+    return result
 
 
 def fetch_all_categories(limit_per_category: int = 2) -> list[Story]:
@@ -367,11 +385,69 @@ def fetch_all_categories(limit_per_category: int = 2) -> list[Story]:
     all_stories: list[Story] = []
     for category in CATEGORIES:
         try:
-            stories = fetch_news(limit=limit_per_category, category=category)
+            stories = fetch_news(
+                limit=limit_per_category,
+                category=category,
+                include_regional=False,
+            )
             all_stories.extend(stories)
         except NewsSourceError as exc:
             logger.warning("Could not fetch category '%s': %s", category, exc)
+    # Regional quotas prevent high-impact local stories from disappearing under
+    # a globally sorted pool dominated by a handful of countries.
+    all_stories.extend(
+        fetch_regional_news(
+            limit_per_region=min(max(3, limit_per_category // 5), 5)
+        )
+    )
     return all_stories
+
+
+def fetch_regional_news(limit_per_region: int = 3) -> list[Story]:
+    """Fetch a minimum candidate quota from every configured world region."""
+    selected: list[Story] = []
+    seen_urls: set[str] = set()
+    coverage: dict[str, int] = {}
+    feed_cache: dict[str, list[Story]] = {}
+
+    for region, feeds in REGIONAL_FEEDS.items():
+        candidates: list[Story] = []
+        for feed_url in feeds:
+            if is_banned(feed_url):
+                continue
+            try:
+                if feed_url not in feed_cache:
+                    feed_cache[feed_url] = _parse_rss_feed(
+                        feed_url, limit=max(30, limit_per_region * 5)
+                    )
+                    record_success(feed_url)
+                stories = feed_cache[feed_url]
+                for story in stories:
+                    if story.source_url not in seen_urls and is_region_relevant(story, region):
+                        story.region = region
+                        story.category = "world"
+                        candidates.append(story)
+                        seen_urls.add(story.source_url)
+            except Exception as exc:
+                # Cache this run's failure so a feed shared by two regions is
+                # attempted and counted only once per job.
+                feed_cache[feed_url] = []
+                record_failure(
+                    feed_url,
+                    f"Regional fetch error: {type(exc).__name__}: {str(exc)[:120]}",
+                )
+
+        candidates.sort(key=discovery_priority, reverse=True)
+        chosen = candidates[:limit_per_region]
+        selected.extend(chosen)
+        coverage[region] = len(chosen)
+
+    logger.info(
+        "Regional discovery added %d candidates: %s",
+        len(selected),
+        ", ".join(f"{region}={count}" for region, count in coverage.items()),
+    )
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -434,7 +510,13 @@ def _article_to_story(article: dict) -> Story | None:
 # ---------------------------------------------------------------------------
 
 def _parse_rss_feed(feed_url: str, limit: int = 10) -> list[Story]:
-    feed    = feedparser.parse(feed_url)
+    response = requests.get(
+        feed_url,
+        timeout=12,
+        headers={"User-Agent": "GlobalPulseNews/1.0 (+news-feed-reader)"},
+    )
+    response.raise_for_status()
+    feed = feedparser.parse(response.content)
     stories = []
     for entry in feed.entries[:limit]:
         title = (getattr(entry, "title", "") or "").strip()

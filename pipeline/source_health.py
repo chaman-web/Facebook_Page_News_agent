@@ -2,10 +2,10 @@
 pipeline/source_health.py — Track RSS feed health and ban unreliable sources.
 
 Rules:
-  - If a feed returns >= DUPLICATE_THRESHOLD duplicates in one fetch → ban 12h
-  - If a feed fails (connection error, timeout, parse error) → ban 12h
-  - After 12h ban expires → source is tried again automatically
-  - Ban records are persisted in source_health.json
+  - A transient failure is recorded but the source remains available next run
+  - Three consecutive failures trigger a one-hour cool-off
+  - One successful response clears the failure streak
+  - Health records are persisted in source_health.json
 """
 
 from __future__ import annotations
@@ -20,7 +20,8 @@ import config
 logger = logging.getLogger(__name__)
 
 HEALTH_FILE         = config.SOURCE_HEALTH_PATH
-BAN_DURATION_H      = 12     # hours to ban a failing source
+BAN_DURATION_H      = 1      # short cool-off after repeated failures
+FAILURE_THRESHOLD   = 3      # a single transient failure must not remove a source
 DUPLICATE_THRESHOLD = 0.8    # ban if 80%+ of stories are duplicates
 
 # ---------------------------------------------------------------------------
@@ -32,6 +33,8 @@ def is_banned(feed_url: str) -> bool:
     data  = _load()
     entry = data.get(feed_url)
     if not entry:
+        return False
+    if not entry.get("banned_until"):
         return False
     banned_until = datetime.fromisoformat(entry["banned_until"])
     if datetime.now(timezone.utc) < banned_until:
@@ -55,6 +58,36 @@ def ban(feed_url: str, reason: str) -> None:
     }
     _save(data)
     logger.warning("⛔ Source banned for %dh — %s | Reason: %s", BAN_DURATION_H, feed_url, reason)
+
+
+def record_failure(feed_url: str, reason: str) -> None:
+    """Record a failure and cool off only after repeated consecutive failures."""
+    data = _load()
+    previous = data.get(feed_url, {})
+    count = int(previous.get("consecutive_failures", 0)) + 1
+    entry = {
+        "consecutive_failures": count,
+        "last_failure": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+    }
+    if count >= FAILURE_THRESHOLD:
+        entry["banned_at"] = datetime.now(timezone.utc).isoformat()
+        entry["banned_until"] = (
+            datetime.now(timezone.utc) + timedelta(hours=BAN_DURATION_H)
+        ).isoformat()
+        logger.warning("⛔ Source cooling off after %d failures — %s", count, feed_url)
+    else:
+        logger.warning("Source failure %d/%d — %s", count, FAILURE_THRESHOLD, feed_url)
+    data[feed_url] = entry
+    _save(data)
+
+
+def record_success(feed_url: str) -> None:
+    """Clear a source's transient failure streak after a successful response."""
+    data = _load()
+    if feed_url in data:
+        del data[feed_url]
+        _save(data)
 
 
 def record_duplicates(feed_url: str, total: int, duplicates: int) -> None:
