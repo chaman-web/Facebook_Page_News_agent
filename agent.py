@@ -67,6 +67,7 @@ from models import (
     DraftStatus,
     GenerationError,
     NewsSourceError,
+    Story,
     StoryRejected,
     VerificationStatus,
 )
@@ -644,6 +645,45 @@ def fetch_and_build(
 # JOB 2 — Publish from queue (instant — no fetch, no generation)
 # ---------------------------------------------------------------------------
 
+def _story_from_queue_entry(entry, *, provenance: str | None = None) -> Story:
+    """Rebuild the publishable Story state stored in a queue entry."""
+    return Story(
+        title=entry.title,
+        source_name=entry.source_name,
+        source_url=entry.source_url,
+        published_at=datetime.now(timezone.utc),
+        raw_summary=entry.post_content or "",
+        post_content=entry.post_content,
+        card_headline=entry.card_headline,
+        hashtags=entry.hashtags or [],
+        image_provenance=provenance or entry.image_provenance,
+        image_credit=entry.image_credit,
+        image_is_synthetic=entry.image_is_synthetic,
+        category=entry.category,
+        draft_status=DraftStatus.READY_FOR_REVIEW,
+        verification_status=VerificationStatus.VERIFIED,
+        verification_score=entry.verification_score,
+        verification_reason=entry.verification_reason,
+        policy_decision=entry.policy_decision,
+        policy_categories=entry.policy_categories or [],
+        policy_reasons=entry.policy_reasons or [],
+        policy_version=entry.policy_version,
+    )
+
+
+def _replace_queue_image_with_fallback(queue, entry, story: Story) -> Path:
+    """Restore a mandatory, policy-safe image without changing story routing."""
+    from image.maker import create_fallback_card
+
+    image_path = create_fallback_card(story)
+    entry.image_path = str(image_path)
+    entry.image_provenance = story.image_provenance
+    entry.image_credit = story.image_credit
+    entry.image_is_synthetic = story.image_is_synthetic
+    queue._save()
+    return image_path
+
+
 def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     """
     Read the queue and publish ready posts via Facebook Graph API.
@@ -750,39 +790,33 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
         logger.info("▶  [%s | %.1f] %s", route_icon, entry.score, entry.title[:60])
 
-        # Reconstruct story for publishing from queue entry data
-        from models import Story
-        from datetime import datetime as dt
-        story = Story(
-            title          = entry.title,
-            source_name    = entry.source_name,
-            source_url     = entry.source_url,
-            published_at   = dt.now(timezone.utc),
-            raw_summary    = "",
-            post_content   = entry.post_content,
-            card_headline  = entry.card_headline,
-            hashtags       = entry.hashtags or [],
-            image_provenance = entry.image_provenance,
-            image_credit     = entry.image_credit,
-            image_is_synthetic = entry.image_is_synthetic,
-            category       = entry.category,
-            draft_status   = DraftStatus.READY_FOR_REVIEW,
-            verification_status = VerificationStatus.VERIFIED,
-            verification_score  = entry.verification_score,
-            verification_reason = entry.verification_reason,
-            policy_decision = entry.policy_decision,
-            policy_categories = entry.policy_categories or [],
-            policy_reasons = entry.policy_reasons or [],
-            policy_version = entry.policy_version,
-        )
+        story = _story_from_queue_entry(entry)
 
         image_path = Path(entry.image_path) if entry.image_path else None
         if not image_path or not image_path.exists():
-            reason = "A valid image card is required before publishing."
-            logger.warning("📝 Review required — %s: %s", reason, entry.title[:60])
-            queue.mark_review_required(entry, reason)
-            metrics["review_required"] += 1
-            continue
+            try:
+                image_path = _replace_queue_image_with_fallback(queue, entry, story)
+                logger.info("Missing image restored with branded fallback: %s", entry.title[:60])
+            except Exception as exc:
+                reason = f"Mandatory fallback image creation failed: {exc}"
+                logger.warning("📝 Review required — %s: %s", reason, entry.title[:60])
+                queue.mark_review_required(entry, reason)
+                metrics["review_required"] += 1
+                continue
+
+        # Pre-provenance queue entries remain publishable without trusting an
+        # image whose reuse rights cannot be established. Replace that legacy
+        # card with the guaranteed local branded fallback.
+        if story.image_provenance == "legacy_unknown":
+            try:
+                image_path = _replace_queue_image_with_fallback(queue, entry, story)
+                logger.info("Legacy image replaced with compliant branded fallback: %s", entry.title[:60])
+            except Exception as exc:
+                reason = f"Legacy image provenance is unknown and fallback creation failed: {exc}"
+                logger.warning("🛡️ %s", reason)
+                queue.mark_review_required(entry, reason)
+                metrics["review_required"] += 1
+                continue
 
         if not story.post_content:
             logger.warning("No post content in queue entry for '%s' — skipping.", entry.title[:50])
@@ -910,12 +944,40 @@ def main(
                         or "Independent-source verification is required.",
                     ))
                     continue
-                if not entry.image_path or not Path(entry.image_path).exists():
-                    skipped.append((entry, "A valid image card is required before publishing."))
+                if not entry.post_content:
+                    skipped.append((entry, "No post content is stored in the queue entry."))
                     continue
-                ok, reason = queue.deserves_publishing(
-                    entry, last_published_at, last_breaking_at
+                preview_provenance = (
+                    "branded_fallback"
+                    if (
+                        entry.image_provenance == "legacy_unknown"
+                        or not entry.image_path
+                        or not Path(entry.image_path).exists()
+                    )
+                    else entry.image_provenance
                 )
+                preview_story = _story_from_queue_entry(entry, provenance=preview_provenance)
+                preview_image_path = (
+                    Path(entry.image_path)
+                    if entry.image_path and Path(entry.image_path).exists()
+                    else Path("dry-run-branded-fallback.jpg")
+                )
+                policy_verdict = evaluate_meta_policy(
+                    preview_story,
+                    image_path=preview_image_path,
+                )
+                if policy_verdict.decision != PolicyDecision.PASS:
+                    skipped.append((
+                        entry,
+                        policy_verdict.reason or "Meta policy review is required.",
+                    ))
+                    continue
+                if force_now:
+                    ok, reason = True, "Explicit --force-now override"
+                else:
+                    ok, reason = queue.deserves_publishing(
+                        entry, last_published_at, last_breaking_at
+                    )
                 if not ok:
                     skipped.append((entry, reason))
                     continue
@@ -934,6 +996,8 @@ def main(
                     i, entry.score, entry.route, entry.title[:70], entry.source_name, reason,
                 )
             logger.info("Would leave %d queued due to timing/editorial gates.", len(skipped))
+            for entry, reason in skipped:
+                logger.info("  HOLD: %s | %s", entry.title[:70], reason)
             _write_run_summary(
                 "publish",
                 "dry_run",

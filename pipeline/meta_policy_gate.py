@@ -17,6 +17,12 @@ from pipeline.observability import RUN_ID
 logger = logging.getLogger(__name__)
 
 POLICY_VERSION = "2026-09"
+APPROVED_IMAGE_PROVENANCE = {
+    "pexels",
+    "licensed_article_image",
+    "branded_fallback",
+    "pollinations_ai",
+}
 
 
 class PolicyDecision(str, Enum):
@@ -149,7 +155,7 @@ def evaluate_meta_policy(story: Story, image_path: Path | None = None) -> Policy
 
     provenance = getattr(story, "image_provenance", "")
     if image_path is not None:
-        if not provenance:
+        if provenance not in APPROVED_IMAGE_PROVENANCE:
             categories.append("image_rights")
             reasons.append("Image provenance or reuse rights are not recorded.")
         if getattr(story, "image_is_synthetic", False) and _SENSITIVE_SYNTHETIC.search(text):

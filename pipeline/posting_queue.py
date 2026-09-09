@@ -1031,12 +1031,22 @@ class PostingQueue:
                 entries_raw = data
             self._entries = []
             for e in entries_raw:
+                legacy_image_name = Path(e.get("image_path") or "").name.lower()
+                inferred_provenance = (
+                    "branded_fallback" if legacy_image_name.endswith("_fallback.jpg")
+                    else "legacy_unknown" if legacy_image_name
+                    else ""
+                )
                 e.setdefault("category_tier",   CATEGORY_TIERS.get(e.get("category", "breaking"), 2))
                 e.setdefault("route",            Route.SCHEDULE.value)
                 e.setdefault("downgraded_from",  None)
                 e.setdefault("image_path",       None)
-                e.setdefault("image_provenance", "")
-                e.setdefault("image_credit",     "")
+                if not e.get("image_provenance"):
+                    e["image_provenance"] = inferred_provenance
+                if not e.get("image_credit") and inferred_provenance == "branded_fallback":
+                    e["image_credit"] = "Global Pulse News"
+                else:
+                    e.setdefault("image_credit", "")
                 e.setdefault("image_is_synthetic", False)
                 e.setdefault("post_content",     None)
                 e.setdefault("card_headline",    None)

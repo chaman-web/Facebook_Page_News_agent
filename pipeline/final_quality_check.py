@@ -7,8 +7,7 @@ Hard checks (block publish — genuinely unfixable):
   3. Facebook policy violations
   4. Near-duplicate of recently published post
 
-Soft checks (warn only, never block):
-  - Image file missing → publishes text-only
+Soft checks (warn only; the publisher restores a branded image fallback):
   - Page hashtag absent
   - Sources line absent
   - No closing question
@@ -89,7 +88,7 @@ def final_quality_check(story: Story, image_path: Path | None = None) -> None:
 
     # ── SOFT warnings — never block ──────────────────────────────────────────
     if image_path is not None and not Path(image_path).exists():
-        logger.warning("Final check: image not found on disk — publishing text-only.")
+        logger.warning("Final check: image not found on disk — publisher will create a branded fallback.")
 
     if not any(t in lower for t in ("#globalpulsenews", "#worldupdate")):
         logger.warning("Final check: page hashtag missing.")

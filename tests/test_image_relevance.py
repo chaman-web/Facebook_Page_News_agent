@@ -10,6 +10,7 @@ from image.maker import (
     _fetch_article_photo,
     _apply_image_provenance,
     _image_description_matches,
+    _synthetic_image_allowed,
     _smart_crop,
     _source_display_name,
     create_fallback_card,
@@ -71,6 +72,40 @@ def test_synthetic_image_provenance_is_attached_to_story():
 
     assert story.image_provenance == "pollinations_ai"
     assert story.image_is_synthetic is True
+
+
+def test_synthetic_images_are_skipped_for_sensitive_stories():
+    sensitive = Story(
+        title="Earthquake leaves dozens dead",
+        source_name="Reuters",
+        source_url="https://reuters.com/earthquake",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="Emergency crews responded after the disaster.",
+        category="world",
+    )
+    safe = Story(
+        title="New processor improves laptop battery life",
+        source_name="Reuters",
+        source_url="https://reuters.com/technology",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="The company announced its latest processor.",
+        category="technology",
+    )
+
+    assert _synthetic_image_allowed(sensitive) is False
+    assert _synthetic_image_allowed(safe) is True
+
+
+def test_breaking_category_skips_synthetic_image_even_without_sensitive_words():
+    story = Story(
+        title="Government announces urgent national update",
+        source_name="Reuters",
+        source_url="https://reuters.com/breaking",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="Officials released a new statement.",
+        category="breaking",
+    )
+    assert _synthetic_image_allowed(story) is False
 
 
 def test_local_fallback_always_creates_an_image_card(tmp_path, monkeypatch):

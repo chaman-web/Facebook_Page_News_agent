@@ -789,7 +789,23 @@ def _fetch_photo(story: Story) -> Optional[Image.Image]:
         if photo:
             return photo
         logger.warning("Pexels unavailable — trying Pollinations.ai")
+    if not _synthetic_image_allowed(story):
+        logger.warning("Synthetic photo skipped for sensitive news — using branded fallback.")
+        return None
     return _pollinations(story.title)
+
+
+def _synthetic_image_allowed(story: Story) -> bool:
+    """Avoid photorealistic synthetic depictions of sensitive real events."""
+    if (story.category or "").lower() in {"breaking", "war", "crime"}:
+        return False
+    text = f"{story.title} {story.raw_summary}"
+    return not re.search(
+        r"\b(?:killed|dead|death|murder|shooting|attack|airstrike|war|explosion|"
+        r"earthquake|flood|wildfire|victim|missing|hostage|terrorist)\b",
+        text,
+        re.IGNORECASE,
+    )
 
 
 def _pexels(query: str, page: int = 1) -> Optional[Image.Image]:

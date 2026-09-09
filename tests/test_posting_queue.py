@@ -1,5 +1,6 @@
 """Regression tests for posting-queue lifecycle behavior."""
 
+import json
 import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
@@ -118,3 +119,50 @@ def test_provisional_story_is_saved_for_review_not_auto_queue(tmp_path):
         assert queue._entries[0].score == 92
         assert queue._entries[0].status == "REVIEW_REQUIRED"
         assert queue.queued_count() == 0
+
+
+def test_legacy_queue_infers_branded_fallback_provenance(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    queue_path.write_text(json.dumps({"entries": [{
+        "title": "Legacy fallback story",
+        "source_name": "Reuters",
+        "source_url": "https://reuters.com/legacy-fallback",
+        "category": "world",
+        "score": 75,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "image_path": str(tmp_path / "Legacy_story_fallback.jpg"),
+    }]}), encoding="utf-8")
+
+    with (
+        patch("pipeline.posting_queue.QUEUE_FILE", queue_path),
+        patch("pipeline.posting_queue.AUDIT_FILE", audit_path),
+    ):
+        entry = PostingQueue()._entries[0]
+
+    assert entry.image_provenance == "branded_fallback"
+    assert entry.image_credit == "Global Pulse News"
+
+
+def test_legacy_queue_marks_unknown_existing_image_for_replacement(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    queue_path.write_text(json.dumps({"entries": [{
+        "title": "Legacy external image story",
+        "source_name": "Reuters",
+        "source_url": "https://reuters.com/legacy-image",
+        "category": "world",
+        "score": 75,
+        "queued_at": datetime.now(timezone.utc).isoformat(),
+        "image_path": str(tmp_path / "Legacy_story.jpg"),
+        "image_provenance": "",
+    }]}), encoding="utf-8")
+
+    with (
+        patch("pipeline.posting_queue.QUEUE_FILE", queue_path),
+        patch("pipeline.posting_queue.AUDIT_FILE", audit_path),
+    ):
+        entry = PostingQueue()._entries[0]
+
+    assert entry.image_provenance == "legacy_unknown"
+    assert entry.image_credit == ""

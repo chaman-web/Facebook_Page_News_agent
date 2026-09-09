@@ -63,6 +63,14 @@ def test_unknown_image_rights_require_review(tmp_path):
     assert "image_rights" in verdict.categories
 
 
+def test_legacy_unknown_image_rights_require_review(tmp_path):
+    story = _story("Economic update", "The central bank announced an interest-rate decision.")
+    story.image_provenance = "legacy_unknown"
+    verdict = evaluate_meta_policy(story, tmp_path / "legacy.jpg")
+    assert verdict.decision == PolicyDecision.REVIEW
+    assert "image_rights" in verdict.categories
+
+
 def test_sensitive_synthetic_image_requires_review(tmp_path):
     story = _story(
         "Earthquake leaves dozens dead",
