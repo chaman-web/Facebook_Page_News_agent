@@ -496,10 +496,11 @@ def _format_post(post: str, story: Story | None = None) -> str:
     )
     if not context:
         context = (story.raw_summary or story.title).split(".")[0].strip()
+    original_context = context
     if not context.lower().startswith("why this matters:"):
         context = f"Why this matters: {context}"
 
-    body_lines = [line for line in cleaned_lines if line != context]
+    body_lines = [line for line in cleaned_lines if line != original_context]
     if body_lines and body_lines[0].lower() in card.lower():
         body_lines.pop(0)
     body = "\n\n".join(body_lines)

@@ -29,6 +29,7 @@ Officials said emergency crews remain at the scene.
     assert lines[1] == "Why this matters: Rescue teams are searching damaged buildings across southern Turkey."
     assert lines[2] == ""
     assert result.count("🌍") == 1
+    assert result.count("Rescue teams are searching damaged buildings across southern Turkey.") == 1
     assert "What do you think" not in result
     assert "👇" not in result
 
