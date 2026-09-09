@@ -40,3 +40,15 @@ def test_accepts_known_location_with_different_preposition():
         "Cargo could travel to North Korea across the first road bridge.",
     )
     assert result.passed
+
+
+def test_ignores_numbers_inside_source_attribution_labels():
+    story = _story()
+    post = (
+        "Russia and North Korea opened their first road bridge.\n\n"
+        "📰 Sources: BBC News, NDTV News Search Records Found 1000"
+    )
+
+    result = check_generated_facts(story, post)
+
+    assert result.passed

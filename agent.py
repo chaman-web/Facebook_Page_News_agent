@@ -1189,7 +1189,15 @@ Examples:
 
     if (args.fetch or args.publish) and not args.dry_run:
         try:
-            with pipeline_lock(Path(__file__).parent / ".pipeline.lock"):
+            # Fetch runs are infrequent and expensive. If one starts during a
+            # short publisher check, wait for that check instead of losing the
+            # entire three-hour fetch slot. Publisher checks remain nonblocking
+            # because they retry automatically every ten minutes.
+            lock_wait_seconds = 120 if args.fetch else 0
+            with pipeline_lock(
+                Path(__file__).parent / ".pipeline.lock",
+                timeout_seconds=lock_wait_seconds,
+            ):
                 sys.exit(run())
         except PipelineBusy as exc:
             logger.info("Pipeline job deferred: %s. The next scheduled run will retry.", exc)

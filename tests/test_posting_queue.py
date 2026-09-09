@@ -234,12 +234,15 @@ def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"
     now = datetime.now(timezone.utc)
+    local_today = datetime.now().astimezone().replace(
+        hour=12, minute=0, second=0, microsecond=0
+    )
     with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
         queue = PostingQueue()
         queue._entries = [
             QueueEntry(f"Regular {i}", "A", f"https://a.test/{i}", "world", 70,
                        now.isoformat(), route=Route.SCHEDULE.value, status="PUBLISHED",
-                       published_at=(now - timedelta(hours=2)).isoformat())
+                       published_at=local_today.isoformat())
             for i in range(12)
         ]
         breaking = QueueEntry("Breaking", "B", "https://b.test", "breaking", 90,

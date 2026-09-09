@@ -173,3 +173,18 @@ def test_repeated_failure_warnings_are_grouped(tmp_path, caplog):
     assert len(warnings) == 1
     state = json.loads(health_file.read_text(encoding="utf-8"))
     assert state[url]["suppressed_failure_logs"] == 1
+
+
+def test_recovered_source_outage_does_not_pollute_error_log(tmp_path, caplog):
+    health_file = tmp_path / "health.json"
+    url = "https://feeds.reuters.com/reuters/topNews"
+    with (
+        patch.object(source_health, "HEALTH_FILE", health_file),
+        caplog.at_level("WARNING"),
+    ):
+        for _ in range(8):
+            source_health.record_failure(url, "DNS connection failure")
+
+    alerts = [record for record in caplog.records if "SOURCE COVERAGE ALERT" in record.message]
+    assert alerts
+    assert all(record.levelname == "WARNING" for record in alerts)
