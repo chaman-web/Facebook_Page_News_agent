@@ -79,6 +79,7 @@ from pipeline.editorial_scorer import EditorialTier, score_and_filter
 from pipeline.final_quality_check import FinalQualityError, final_quality_check
 from pipeline.generator import generate_post
 from pipeline.high_value_backlog import pending_stories, remember, resolve
+from pipeline.log_retention import retained_log_handler
 from pipeline.posting_queue import HARD_DAILY_CEILING, PostingQueue, Route
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
@@ -86,9 +87,9 @@ from pipeline.verifier import set_rss_pool, verify_story
 _log_handlers: list[logging.Handler] = [logging.StreamHandler()]
 config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
 if "--fetch" in sys.argv:
-    _log_handlers.append(logging.FileHandler(config.LOGS_DIR / "job1_fetch.log", encoding="utf-8"))
+    _log_handlers.append(retained_log_handler(config.LOGS_DIR / "job1_fetch.log"))
 elif "--publish" in sys.argv:
-    _log_handlers.append(logging.FileHandler(config.LOGS_DIR / "job2_publish.log", encoding="utf-8"))
+    _log_handlers.append(retained_log_handler(config.LOGS_DIR / "job2_publish.log"))
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(message)s",
