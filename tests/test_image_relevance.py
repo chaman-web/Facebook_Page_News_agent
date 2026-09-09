@@ -8,6 +8,7 @@ from image.maker import (
     _context_line,
     _fallback_background,
     _fetch_article_photo,
+    _headline_display_case,
     _apply_image_provenance,
     _image_description_matches,
     _synthetic_image_allowed,
@@ -20,6 +21,13 @@ from image.maker import (
 def test_stock_metadata_must_overlap_query():
     assert _image_description_matches("Canada tariffs", "Canadian flag outside parliament")
     assert not _image_description_matches("Canada tariffs", "Laptop on an office desk")
+
+
+def test_headline_display_case_preserves_news_acronyms():
+    assert (
+        _headline_display_case("UK AND US AGREE ON AI SAFETY PLAN")
+        == "UK and US Agree on AI Safety Plan"
+    )
 
 
 def test_article_photo_is_preferred_when_available():

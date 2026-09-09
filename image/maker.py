@@ -50,8 +50,8 @@ PHOTO_BOT    = 1170
 
 # ── Typography ───────────────────────────────────────────────────────────────
 LABEL_SIZE      = 28
-HEADLINE_SIZE   = 80
-HEADLINE_MIN    = 58
+HEADLINE_SIZE   = 110
+HEADLINE_MIN    = 74
 CONTEXT_SIZE    = 32
 DATE_SIZE       = 24
 SOURCE_SIZE     = 22
@@ -141,13 +141,13 @@ _IMPACT_WORDS: list[tuple[int, list[str]]] = [
     # Tier 4 — strong verbs / superlatives
     (4, ["RECORD", "LARGEST", "BIGGEST", "FIRST", "LAST", "ONLY",
          "SHOCKING", "MAJOR", "CRITICAL", "URGENT", "SIGNIFICANT",
-         "RISING", "SURGES", "SURGED", "PLUNGES", "PLUNGED",
+         "SHIFT", "RISING", "SURGES", "SURGED", "PLUNGES", "PLUNGED",
          "WARNS", "WARNING", "FEARS", "DEMANDS", "REFUSES"]),
 ]
 
 def _find_impact_words(headline: str) -> list[str]:
     """
-    Find up to 2 most impactful words in the headline.
+    Find the most impactful word in the headline.
     Returns words as they appear in the headline (preserving case).
     Tier 1 words get priority — if 2 Tier 1 words found, return both.
     Otherwise return best from Tier 1 + best from Tier 2, etc.
@@ -163,7 +163,7 @@ def _find_impact_words(headline: str) -> list[str]:
                 original = words[idx]
                 if original not in found:
                     found.append(original)
-            if len(found) >= 2:
+            if len(found) >= 1:
                 return found
     return found
 
@@ -969,15 +969,17 @@ def _compose(
         draw.rectangle([(dx1, MT), (dx2, MT + 38)], fill=(0, 0, 0))
         draw.text((dx1 + 14, MT + 8), disclosure, font=disclosure_font, fill=WHITE)
 
-    headline = getattr(story, "card_headline", None) or _short_headline(story.title)
+    headline = _headline_display_case(
+        getattr(story, "card_headline", None) or _short_headline(story.title)
+    )
     impact_words = _find_impact_words(headline)
     max_w = IMAGE_WIDTH - ML - MR
     hl_size = HEADLINE_SIZE
-    hl_font = _font("Montserrat-ExtraBold.ttf", hl_size)
+    hl_font = _font("BarlowCondensed-ExtraBold.ttf", hl_size)
     lines = _wrap_text(draw, headline, hl_font, max_w).splitlines()
     while (len(lines) > 3 or len(lines) * int(hl_size * 1.2) > 310) and hl_size > HEADLINE_MIN:
         hl_size -= 4
-        hl_font = _font("Montserrat-ExtraBold.ttf", hl_size)
+        hl_font = _font("BarlowCondensed-ExtraBold.ttf", hl_size)
         lines = _wrap_text(draw, headline, hl_font, max_w).splitlines()
     if len(lines) > 3:
         lines = lines[:3]
@@ -1243,6 +1245,32 @@ def _short_headline(title: str) -> str:
     if len(words) <= 12:
         return title.upper()
     return " ".join(words[:10]).upper() + "..."
+
+
+def _headline_display_case(headline: str) -> str:
+    """Turn generated all-caps copy into readable editorial title case."""
+    if headline != headline.upper():
+        return headline
+
+    small_words = {"a", "an", "and", "as", "at", "by", "for", "from", "in", "of", "on", "or", "the", "to", "with"}
+    acronyms = {"AI", "AP", "BBC", "CEO", "EU", "FBI", "GDP", "KSA", "NATO", "NHS", "UAE", "UK", "UN", "US", "WHO"}
+    words = headline.split()
+    result: list[str] = []
+    for index, word in enumerate(words):
+        match = re.match(r"^([^A-Za-z0-9]*)([A-Za-z0-9.'%-]+)([^A-Za-z0-9]*)$", word)
+        if not match:
+            result.append(word)
+            continue
+        prefix, core, suffix = match.groups()
+        upper_core = core.upper()
+        if upper_core in acronyms or re.fullmatch(r"(?:[A-Z]\.){2,}", upper_core):
+            styled = upper_core
+        elif index not in {0, len(words) - 1} and core.lower() in small_words:
+            styled = core.lower()
+        else:
+            styled = core.capitalize()
+        result.append(f"{prefix}{styled}{suffix}")
+    return " ".join(result)
 
 
 def _keywords(title: str, broad: bool = False) -> str:
