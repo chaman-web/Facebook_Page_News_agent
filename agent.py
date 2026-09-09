@@ -88,7 +88,12 @@ from pipeline.meta_policy_gate import (
     record_policy_decision,
 )
 from pipeline.observability import RUN_ID, add_run_id, write_daily_summary
-from pipeline.posting_queue import HARD_DAILY_CEILING, PostingQueue, Route
+from pipeline.posting_queue import (
+    HARD_DAILY_CEILING,
+    PUBLISH_NOW_MIN_GAP,
+    PostingQueue,
+    Route,
+)
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
 
@@ -582,10 +587,12 @@ def fetch_and_build(
 
     direct_published = 0
     direct_failed = 0
+    last_direct_publish_at: datetime | None = None
     if immediate_posts:
         from facebook.publisher import publish_post_with_image
         for escore, story, image_path in immediate_posts:
             try:
+                _wait_for_immediate_spacing(last_direct_publish_at)
                 post_id = publish_post_with_image(story, Path(image_path))
                 queue.record_direct_publish(
                     story, escore.total, escore.effective_tier_num,
@@ -597,6 +604,7 @@ def fetch_and_build(
                 mark_seen(story, permanent=True)
                 resolve(story.source_url)
                 direct_published += 1
+                last_direct_publish_at = datetime.now(timezone.utc)
                 logger.info("✅ Published immediately [%.1f]: %s", escore.total, story.title[:60])
             except Exception as exc:
                 # Preserve the story for an automatic retry if Facebook is
@@ -686,6 +694,23 @@ def _replace_queue_image_with_fallback(queue, entry, story: Story) -> Path:
     entry.image_is_synthetic = story.image_is_synthetic
     queue._save()
     return image_path
+
+
+def _wait_for_immediate_spacing(
+    last_published_at: datetime | None,
+    *,
+    now: datetime | None = None,
+) -> float:
+    """Enforce the breaking-news gap after the first successful direct post."""
+    if last_published_at is None:
+        return 0.0
+    current = now or datetime.now(timezone.utc)
+    remaining = PUBLISH_NOW_MIN_GAP.total_seconds() - (current - last_published_at).total_seconds()
+    if remaining <= 0:
+        return 0.0
+    logger.info("High-impact spacing active — waiting %.0f seconds before the next post.", remaining)
+    time.sleep(remaining)
+    return remaining
 
 
 def publish_from_queue(force_now: bool = False, count: int = 0) -> int:

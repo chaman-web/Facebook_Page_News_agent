@@ -248,7 +248,8 @@ FORMATTING RULES (follow exactly):
 - Put a BLANK LINE between every paragraph.
 - DO NOT start with boring phrases like "In a significant development..." or "According to reports..." or "It has been reported that..."
 - Use 1-2 relevant emojis per paragraph as visual anchors — not decoration.
-- End with a direct QUESTION to the audience. This is mandatory.
+- Add one natural, story-specific question only when it improves understanding.
+- Never ask people to like, share, comment, tag others, or "drop" an opinion.
 
 FIRST TWO LINES ARE CRITICAL — THE HOOK:
 Facebook commonly shows only the opening lines before "See more". Make both lines specific and compelling.
@@ -258,7 +259,7 @@ Line 1: Begin with exactly ONE relevant symbol, then the strongest verified fact
          "⚡ JUST IN: Germany's far-right AfD wins landslide in eastern states."
          "📌 DEVELOPING: Delhi building collapse — 6 killed, dozens still trapped."
          "🌍 WORLD: Pakistan formally rejects India's claims over Kashmir."
-Line 2: What it means OR why it matters — one sentence that gives context or stakes.
+Line 2: Start with "Why this matters:" and give one grounded sentence explaining the consequence or stakes.
 Line 3 (optional): One key detail or number that adds weight.
 
 At the very end of the post, always include:
@@ -404,26 +405,26 @@ Example for this story:
 
 The post MUST follow this structure:
 LINE 1: {cat_emoji} [single most striking verified fact — under 12 words]
-LINE 2: [what it means or why it matters — one sentence]
+LINE 2: Why this matters: [one consequence or stake supported by the supplied evidence]
 LINE 3 (optional): [one key detail or number that adds weight]
 [BLANK LINE]
 BODY: 2-3 short paragraphs (max 2-3 sentences each), blank line between each.
-CLOSING QUESTION: Ask the audience something specific and thought-provoking. End with 👇
+OPTIONAL QUESTION: Include only a specific, natural question that adds civic or practical context. Omit it when it would be generic. Never request likes, shares, comments, tags, or reactions, and do not add 👇.
 SOURCES: 📰 Sources: {', '.join(unique_source_names)}
 
 Write the post now."""
 
 
 # ---------------------------------------------------------------------------
-# Post formatting — enforce short paragraphs + question ending
+# Post formatting — enforce a grounded two-line opening
 # ---------------------------------------------------------------------------
 
-_QUESTION_FALLBACKS = [
-    "What do you think about this? Share your thoughts below 👇",
-    "How do you see this unfolding? Drop your opinion below 👇",
-    "Do you think this will make a difference? Let us know below 👇",
-    "What's your take on this? Comment below 👇",
-]
+_GENERIC_ENGAGEMENT_PROMPT = re.compile(
+    r"^(?:what do you think(?: about this)?|what is your view on this development|"
+    r"how do you see this unfolding|what(?:'s| is) your take on this)\??"
+    r"(?:\s*(?:share your thoughts|drop your opinion|let us know|comment)\s*(?:below)?)?\s*👇?$",
+    re.IGNORECASE,
+)
 
 
 def _grounded_fallback_post(story: Story) -> str:
@@ -449,14 +450,15 @@ def _grounded_fallback_post(story: Story) -> str:
             break
 
     context = sentences[0] if sentences else story.title
-    detail = "\n\n".join(sentences[1:])
+    detail = "\n\n".join(sentences[2:] if len(sentences) > 1 else [])
     sources = [story.source_name]
     sources.extend(source.get("name", "") for source in story.corroborating_sources or [])
     sources = list(dict.fromkeys(name for name in sources if name))
-    raw = f"{story.card_headline}\n{context}"
+    why_it_matters = sentences[1] if len(sentences) > 1 else context
+    raw = f"{story.card_headline}\nWhy this matters: {why_it_matters}"
     if detail:
         raw += f"\n\n{detail}"
-    raw += f"\n\nWhat is your view on this development? 👇\n\n📰 Sources: {', '.join(sources)}"
+    raw += f"\n\n📰 Sources: {', '.join(sources)}"
     return _format_post(raw, story)
 
 def _format_post(post: str, story: Story | None = None) -> str:
@@ -478,7 +480,7 @@ def _format_post(post: str, story: Story | None = None) -> str:
             r"^(?:BREAKING|JUST IN|DEVELOPING|WORLD|WAR UPDATE|POLITICS|TECH|BUSINESS|SPORTS|CRIME|CLIMATE|SCIENCE|ENTERTAINMENT|HEALTH|JOBS)\s*:\s*",
             "", line, flags=re.I,
         ).strip()
-        if line:
+        if line and not _GENERIC_ENGAGEMENT_PROMPT.match(line):
             cleaned_lines.append(line)
 
     # The generated first line is usually another headline. Use the next
@@ -494,14 +496,13 @@ def _format_post(post: str, story: Story | None = None) -> str:
     )
     if not context:
         context = (story.raw_summary or story.title).split(".")[0].strip()
+    if not context.lower().startswith("why this matters:"):
+        context = f"Why this matters: {context}"
 
     body_lines = [line for line in cleaned_lines if line != context]
     if body_lines and body_lines[0].lower() in card.lower():
         body_lines.pop(0)
     body = "\n\n".join(body_lines)
-    tail = f"{context} {body}"
-    if "?" not in tail and "👇" not in tail:
-        body = (body + "\n\n" if body else "") + _QUESTION_FALLBACKS[0]
 
     opening = f"{hook_line}\n{context}"
     return opening + (f"\n\n{body}" if body else "")

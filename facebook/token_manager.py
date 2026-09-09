@@ -33,6 +33,7 @@ ENV_PATH = config.ENV_PATH
 
 # Tokens with more than this many seconds remaining are considered valid
 MIN_REMAINING_SECONDS = 60 * 60  # 1 hour
+LONG_LIVED_MIN_REMAINING_SECONDS = 24 * 60 * 60  # longer than a normal short-lived token
 
 
 class TokenExpiredError(Exception):
@@ -71,22 +72,31 @@ class TokenManager:
             )
 
         expires_at = info.get("expires_at", 0)
-        token_type = "long-lived" if expires_at == 0 or expires_at > 5_000_000_000 else "short-lived"
+        remaining = (
+            expires_at - datetime.now(timezone.utc).timestamp()
+            if expires_at
+            else float("inf")
+        )
+        token_type = (
+            "long-lived"
+            if expires_at == 0 or remaining >= LONG_LIVED_MIN_REMAINING_SECONDS
+            else "short-lived"
+        )
 
         if expires_at and expires_at != 0:
-            remaining = expires_at - datetime.now(timezone.utc).timestamp()
             expires_dt = datetime.fromtimestamp(expires_at, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             logger.info("Token is %s. Expires: %s (%.0f hours remaining)", token_type, expires_dt, remaining / 3600)
 
             if remaining < MIN_REMAINING_SECONDS:
-                raise TokenExpiredError(
-                    f"Facebook token expires soon ({expires_dt}) and cannot be auto-refreshed.\n\n"
-                    "To fix:\n"
-                    "1. Go to https://developers.facebook.com/tools/explorer\n"
-                    "2. Select your app → Generate Access Token\n"
-                    "3. Run: me/accounts → copy the page access_token\n"
-                    "4. Update FACEBOOK_PAGE_TOKEN in your .env file"
-                )
+                if not (config.FACEBOOK_APP_ID and config.FACEBOOK_APP_SECRET):
+                    raise TokenExpiredError(
+                        f"Facebook token expires soon ({expires_dt}) and cannot be auto-refreshed.\n\n"
+                        "To fix:\n"
+                        "1. Go to https://developers.facebook.com/tools/explorer\n"
+                        "2. Select your app → Generate Access Token\n"
+                        "3. Run: me/accounts → copy the page access_token\n"
+                        "4. Update FACEBOOK_PAGE_TOKEN in your .env file"
+                    )
         else:
             logger.info("Token is long-lived (no expiry). All good.")
 

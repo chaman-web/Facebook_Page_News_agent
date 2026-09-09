@@ -93,6 +93,11 @@ Verification and editorial importance are separate decisions:
 - Only images with recorded provenance are accepted. Missing or legacy images are replaced
   with a locally generated branded fallback, so posts are never published as text only.
 - Sensitive real-world stories do not use synthetic event imagery.
+- Generic engagement prompts are removed; a story-specific question is optional.
+- Every new caption opens with a grounded `Why this matters:` explanation.
+- Multiple immediate high-impact posts are separated by ten minutes after the first post.
+- Publish preflight checks `pages_manage_posts`, Page ID, Graph API version, token and data
+  expiry, and the Page's API-visible `is_published` and `can_post` status.
 
 ### JSON structure
 

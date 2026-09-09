@@ -5,7 +5,7 @@ from unittest.mock import Mock, patch
 
 os.environ.setdefault("NEWSAPI_KEY", "test-key")
 
-from agent import _replace_queue_image_with_fallback  # noqa: E402
+from agent import _replace_queue_image_with_fallback, _wait_for_immediate_spacing  # noqa: E402
 from models import Story  # noqa: E402
 
 
@@ -41,3 +41,20 @@ def test_publish_recovery_replaces_missing_queue_image_with_branded_fallback(tmp
     assert entry.image_provenance == "branded_fallback"
     assert entry.image_credit == "Global Pulse News"
     queue._save.assert_called_once_with()
+
+
+def test_first_immediate_post_has_no_spacing_delay():
+    with patch("agent.time.sleep") as sleep:
+        assert _wait_for_immediate_spacing(None) == 0
+    sleep.assert_not_called()
+
+
+def test_later_immediate_post_waits_for_ten_minute_gap():
+    now = datetime.now(timezone.utc)
+    with patch("agent.time.sleep") as sleep:
+        waited = _wait_for_immediate_spacing(
+            now.replace(microsecond=0),
+            now=now.replace(microsecond=0),
+        )
+    assert waited == 600
+    sleep.assert_called_once_with(600)

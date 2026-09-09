@@ -1,8 +1,8 @@
 """
 facebook/token_validator.py — Fast pre-flight token check before any publishing run.
 
-Performs a lightweight GET /me?fields=id call instead of the heavier /debug_token.
-Fails in under 3 seconds with a clear human-readable message.
+Checks token validity and permissions, configured Page identity, and API-visible
+Page publishing restrictions before any scheduled publish starts.
 
 Usage (in agent.py):
     from facebook.token_validator import validate_token_or_exit
@@ -12,22 +12,30 @@ Usage (in agent.py):
 from __future__ import annotations
 
 import logging
+import re
 import sys
+from datetime import datetime, timezone
 
 import requests
 
 import config
-from facebook.token_manager import TokenExpiredError, TokenManager
-
 logger = logging.getLogger(__name__)
 
 GRAPH_API_URL = f"https://graph.facebook.com/{config.FACEBOOK_GRAPH_API_VERSION}"
 _VALIDATION_TIMEOUT = 6   # seconds — fast fail, don't block the run
+_REQUIRED_SCOPES = {"pages_manage_posts"}
+
+
+def _fail(message: str, exit_on_failure: bool) -> bool:
+    logger.error("🔴 Facebook Page preflight failed — %s", message)
+    if exit_on_failure:
+        sys.exit(1)
+    return False
 
 
 def validate_token_or_exit(exit_on_failure: bool = True) -> bool:
     """
-    Validate the Facebook token with a lightweight /me?fields=id call.
+    Validate token permissions and the configured Page's publishing state.
 
     Returns True if valid.
     If invalid and exit_on_failure=True (default): logs a clear error and exits.
@@ -35,75 +43,105 @@ def validate_token_or_exit(exit_on_failure: bool = True) -> bool:
     """
     token = config.FACEBOOK_PAGE_TOKEN
     if not token:
-        msg = (
-            "\n🔴 FACEBOOK_PAGE_TOKEN is not set in .env.\n"
-            "   Get a token from: https://developers.facebook.com/tools/explorer\n"
-            "   Then set FACEBOOK_PAGE_TOKEN=<your_token> in .env\n"
+        return _fail("FACEBOOK_PAGE_TOKEN is not set in .env.", exit_on_failure)
+    if not config.FACEBOOK_PAGE_ID:
+        return _fail("FACEBOOK_PAGE_ID is not set in .env.", exit_on_failure)
+    if not re.fullmatch(r"v\d+\.\d+", config.FACEBOOK_GRAPH_API_VERSION):
+        return _fail(
+            f"Invalid Graph API version '{config.FACEBOOK_GRAPH_API_VERSION}'.",
+            exit_on_failure,
         )
-        logger.error(msg)
-        if exit_on_failure:
-            sys.exit(1)
-        return False
 
-    logger.info("🔑 Validating Facebook token...")
+    logger.info("🔑 Running Facebook Page publishing preflight...")
     try:
-        resp = requests.get(
-            f"{GRAPH_API_URL}/me",
-            params={"fields": "id,name", "access_token": token},
+        app_access_token = (
+            f"{config.FACEBOOK_APP_ID}|{config.FACEBOOK_APP_SECRET}"
+            if config.FACEBOOK_APP_ID and config.FACEBOOK_APP_SECRET
+            else token
+        )
+        debug_response = requests.get(
+            f"{GRAPH_API_URL}/debug_token",
+            params={"input_token": token, "access_token": app_access_token},
             timeout=_VALIDATION_TIMEOUT,
         )
-        data = resp.json()
+        debug_response.raise_for_status()
+        debug_payload = debug_response.json()
+        if "error" in debug_payload:
+            error = debug_payload["error"]
+            _print_token_error(error.get("code"), error.get("type", ""), error.get("message", ""))
+            return _fail("Token debug request was rejected.", exit_on_failure)
+        token_info = debug_payload.get("data", {})
+        if not token_info.get("is_valid"):
+            return _fail("Page access token is invalid or expired.", exit_on_failure)
 
-        # Token error
-        if "error" in data:
-            err   = data["error"]
-            code  = err.get("code")
-            msg   = err.get("message", "Unknown error")
-            etype = err.get("type", "")
-            _print_token_error(code, etype, msg)
-            if exit_on_failure:
-                sys.exit(1)
-            return False
-
-        # Success — token is valid
-        page_id   = data.get("id", "unknown")
-        page_name = data.get("name", "")
-        logger.info(
-            "✅ Token valid — Page: %s (ID: %s)",
-            page_name or "unknown", page_id,
+        scopes = set(token_info.get("scopes") or [])
+        scopes.update(
+            item.get("scope", "") for item in token_info.get("granular_scopes") or []
         )
+        missing_scopes = sorted(_REQUIRED_SCOPES - scopes)
+        if missing_scopes:
+            return _fail(
+                "Missing required permission(s): " + ", ".join(missing_scopes),
+                exit_on_failure,
+            )
 
-        # Also run the full TokenManager check for expiry warning
-        try:
-            TokenManager().get_valid_token()
-        except TokenExpiredError as exc:
-            logger.warning("⚠️  Token expiry warning: %s", str(exc).splitlines()[0])
+        granular_posts = next(
+            (
+                item for item in token_info.get("granular_scopes") or []
+                if item.get("scope") == "pages_manage_posts"
+            ),
+            None,
+        )
+        if granular_posts and granular_posts.get("target_ids"):
+            if str(config.FACEBOOK_PAGE_ID) not in {str(value) for value in granular_posts["target_ids"]}:
+                return _fail(
+                    "pages_manage_posts is not granted for the configured Page ID.",
+                    exit_on_failure,
+                )
 
+        now_ts = datetime.now(timezone.utc).timestamp()
+        for label, value in (
+            ("token", token_info.get("expires_at", 0)),
+            ("data access", token_info.get("data_access_expires_at", 0)),
+        ):
+            if value and value <= now_ts:
+                return _fail(f"Facebook {label} has expired.", exit_on_failure)
+
+        page_response = requests.get(
+            f"{GRAPH_API_URL}/{config.FACEBOOK_PAGE_ID}",
+            params={
+                "fields": "id,name,is_published,can_post",
+                "access_token": token,
+            },
+            timeout=_VALIDATION_TIMEOUT,
+        )
+        page_response.raise_for_status()
+        page = page_response.json()
+        if "error" in page:
+            error = page["error"]
+            return _fail(
+                f"Page status request failed: {error.get('message', 'Unknown error')}",
+                exit_on_failure,
+            )
+        if str(page.get("id")) != str(config.FACEBOOK_PAGE_ID):
+            return _fail("Token Page ID does not match FACEBOOK_PAGE_ID.", exit_on_failure)
+        if page.get("is_published") is False:
+            return _fail("The configured Facebook Page is not published.", exit_on_failure)
+        if page.get("can_post") is False:
+            return _fail("Facebook currently restricts posting to this Page.", exit_on_failure)
+
+        logger.info(
+            "✅ Facebook Page preflight passed — %s (ID: %s), %s, pages_manage_posts granted.",
+            page.get("name") or "unknown",
+            page.get("id"),
+            config.FACEBOOK_GRAPH_API_VERSION,
+        )
         return True
 
-    except requests.ConnectionError:
-        logger.error(
-            "🔴 Cannot reach Facebook API — check your internet connection.\n"
-            "   Publishing skipped for this run."
-        )
-        if exit_on_failure:
-            sys.exit(1)
-        return False
-
-    except requests.Timeout:
-        logger.error(
-            "🔴 Facebook API did not respond within %ds.\n"
-            "   Publishing skipped for this run.", _VALIDATION_TIMEOUT
-        )
-        if exit_on_failure:
-            sys.exit(1)
-        return False
-
-    except Exception as exc:
-        logger.error("🔴 Token validation failed unexpectedly: %s", exc)
-        if exit_on_failure:
-            sys.exit(1)
-        return False
+    except requests.RequestException as exc:
+        return _fail(f"Graph API request failed: {exc}", exit_on_failure)
+    except (TypeError, ValueError) as exc:
+        return _fail(f"Invalid Graph API response: {exc}", exit_on_failure)
 
 
 def _print_token_error(code: int | None, etype: str, msg: str) -> None:

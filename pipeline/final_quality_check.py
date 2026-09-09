@@ -10,7 +10,6 @@ Hard checks (block publish — genuinely unfixable):
 Soft checks (warn only; the publisher restores a branded image fallback):
   - Page hashtag absent
   - Sources line absent
-  - No closing question
 
 Philosophy: fix it, don't reject it. This gate stops harmful/stale content only.
 """
@@ -95,9 +94,6 @@ def final_quality_check(story: Story, image_path: Path | None = None) -> None:
 
     if "sources:" not in lower:
         logger.warning("Final check: sources line missing.")
-
-    if "?" not in post and "👇" not in post:
-        logger.warning("Final check: no closing question.")
 
     # ── All hard checks passed ───────────────────────────────────────────────
     logger.info("✅ Final quality check passed.")

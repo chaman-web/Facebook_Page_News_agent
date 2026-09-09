@@ -20,4 +20,6 @@ def test_fallback_uses_verified_evidence_and_passes_fact_check():
     )
     post = _grounded_fallback_post(story)
     assert "BBC News" in post
+    assert "Why this matters:" in post
+    assert "👇" not in post
     assert check_generated_facts(story, post).passed
