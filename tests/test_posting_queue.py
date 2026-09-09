@@ -151,6 +151,22 @@ def test_entries_remain_queued_until_48_hour_freshness_limit(tmp_path):
         assert entry.status == "QUEUED"
 
 
+def test_dry_run_style_cleanup_can_be_kept_in_memory(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    old = (datetime.now(timezone.utc) - timedelta(hours=60)).isoformat()
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        queue._entries = [QueueEntry("Old", "A", "https://a.test/old", "world", 70, old)]
+        queue._save()
+        original = queue_path.read_text(encoding="utf-8")
+        queue._save = lambda: None
+        queue._audit = lambda *args, **kwargs: None
+        queue.purge_old(max_age_hours=48)
+        assert queue._entries == []
+        assert queue_path.read_text(encoding="utf-8") == original
+
+
 def test_regular_queue_is_global_score_first_and_retries_are_preserved(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"

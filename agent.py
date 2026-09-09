@@ -179,6 +179,11 @@ def fetch_and_build(
     """
     reset_generation_backend_state()
     queue = PostingQueue()
+    if dry_run:
+        # All queue cleanup and reconciliation below must remain in-memory.
+        # A dry run must never alter the live queue or its audit history.
+        queue._save = lambda: None
+        queue._audit = lambda *args, **kwargs: None
     metrics = {
         "fetched": 0,
         "duplicates": 0,
