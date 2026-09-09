@@ -28,7 +28,7 @@ Pipeline:
       ↓      UNVERIFIED stories capped at 55 (below PUBLISH floor)
       ↓
   STAGE 5  — STORY SELECTION
-      ↓      Top stories per category up to requested count
+      ↓      Every verified Tier 1/Tier 2 candidate; limited provisional reviews
       ↓
   STAGE 6  — BUILD READY-TO-PUBLISH POSTS
       ↓      Generate → Validate → Image → Attention Score → Quality
@@ -133,7 +133,7 @@ POST_SLEEP_SECONDS = 60
 
 
 def _select_verified_and_provisional(items: list, per_lane: int) -> list:
-    """Keep publish candidates and powerful review candidates independently."""
+    """Keep every eligible verified story and cap only provisional reviews."""
     verified = [
         item for item in items
         if item[1].verification_status == VerificationStatus.VERIFIED
@@ -142,7 +142,7 @@ def _select_verified_and_provisional(items: list, per_lane: int) -> list:
         item for item in items
         if item[1].verification_status != VerificationStatus.VERIFIED
     ]
-    return verified[:per_lane] + provisional[:per_lane]
+    return verified + provisional[:per_lane]
 
 
 def _preserve_high_impact(scored: list, selected: list) -> list:
@@ -1128,7 +1128,7 @@ Examples:
     parser.add_argument("--image",          action="store_true",  help="Build image cards during --fetch.")
     parser.add_argument("--dry-run",        action="store_true",  help="Preview --fetch pipeline without writing or queuing.")
     parser.add_argument("--count",          type=int, default=1,
-                        help="Posts per category for --fetch, or maximum posts for --publish (default: 1; use 0 for all eligible).")
+                        help="Provisional reviews per category for --fetch, or maximum posts for --publish (default: 1; use 0 for all eligible).")
     parser.add_argument("--category",       type=str, default="breaking", choices=list(CATEGORIES.keys()),
                         help="Single category to fetch (default: all).")
     parser.add_argument("--all-categories", action="store_true",  help="Fetch all 14 categories.")

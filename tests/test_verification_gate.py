@@ -75,6 +75,26 @@ def test_selection_keeps_verified_and_provisional_candidates_separately():
     ]
 
 
+def test_selection_keeps_all_verified_tier_candidates_each_fetch_run():
+    verified_stories = []
+    for index in range(3):
+        story = _powerful_provisional_story()
+        story.title = f"Verified consequential story {index}"
+        story.source_url = f"https://bbc.com/verified-{index}"
+        story.verification_status = VerificationStatus.VERIFIED
+        story.verification_score = 85
+        verified_stories.append(story)
+
+    selected = _select_verified_and_provisional(
+        [(score_story(story), story) for story in verified_stories],
+        per_lane=1,
+    )
+
+    assert [story.source_url for _, story in selected] == [
+        story.source_url for story in verified_stories
+    ]
+
+
 def test_synthetic_image_disclosure_is_added_to_facebook_caption(tmp_path):
     story = Story(
         title="Technology company releases a new processor",
