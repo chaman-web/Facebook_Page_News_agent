@@ -226,6 +226,10 @@ class QueueEntry:
     impact_score:       float       = 0.0
     impact_reasons:     Optional[list] = None
     routing_reason:     str         = ""
+    policy_decision:    str         = ""
+    policy_categories:  Optional[list] = None
+    policy_reasons:     Optional[list] = None
+    policy_version:     str         = ""
     facebook_post_id: Optional[str] = None
 
     @property
@@ -320,6 +324,10 @@ class PostingQueue:
             impact_score = float(impact_score or 0.0),
             impact_reasons = list(impact_reasons or []),
             routing_reason = routing_reason,
+            policy_decision = getattr(story, "policy_decision", ""),
+            policy_categories = list(getattr(story, "policy_categories", []) or []),
+            policy_reasons = list(getattr(story, "policy_reasons", []) or []),
+            policy_version = getattr(story, "policy_version", ""),
             status = (
                 "QUEUED"
                 if story.verification_status == VerificationStatus.VERIFIED
@@ -565,6 +573,10 @@ class PostingQueue:
                 routing_reason=(
                     "impact score >= 10" if impact_score >= 10 else "editorial score >= 80"
                 ),
+                policy_decision=getattr(story, "policy_decision", ""),
+                policy_categories=list(getattr(story, "policy_categories", []) or []),
+                policy_reasons=list(getattr(story, "policy_reasons", []) or []),
+                policy_version=getattr(story, "policy_version", ""),
             )
             self._entries.append(entry)
         self.mark_published(entry, post_id=post_id)
@@ -1034,6 +1046,10 @@ class PostingQueue:
                 e.setdefault("impact_score",        0.0)
                 e.setdefault("impact_reasons",      [])
                 e.setdefault("routing_reason",      "legacy queue entry")
+                e.setdefault("policy_decision",     "")
+                e.setdefault("policy_categories",   [])
+                e.setdefault("policy_reasons",      [])
+                e.setdefault("policy_version",      "")
                 e.setdefault(
                     "verification_reason",
                     "Legacy queue entry has no independent-source verification evidence.",

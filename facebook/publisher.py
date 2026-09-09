@@ -21,6 +21,7 @@ import requests
 import config
 from facebook.token_manager import TokenExpiredError, TokenManager
 from models import DraftStatus, Story, VerificationStatus
+from pipeline.meta_policy_gate import PolicyDecision, evaluate_meta_policy
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,13 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
 
     if image_path is None or not image_path.exists():
         raise FacebookPublishError("A valid image card is required before publishing.")
+
+    policy_verdict = evaluate_meta_policy(story, image_path=image_path)
+    if policy_verdict.decision != PolicyDecision.PASS:
+        raise FacebookPublishError(
+            "Meta policy review required before publishing: "
+            + (policy_verdict.reason or policy_verdict.decision.value)
+        )
 
     if not config.FACEBOOK_PAGE_ID or not config.FACEBOOK_PAGE_TOKEN:
         raise FacebookPublishError(

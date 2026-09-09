@@ -76,10 +76,20 @@ def test_selection_keeps_verified_and_provisional_candidates_separately():
 
 
 def test_synthetic_image_disclosure_is_added_to_facebook_caption(tmp_path):
-    story = _powerful_provisional_story()
-    story.verification_status = VerificationStatus.VERIFIED
-    story.verification_score = 90
-    story.image_is_synthetic = True
+    story = Story(
+        title="Technology company releases a new processor",
+        source_name="Reuters",
+        source_url="https://reuters.com/technology",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="The company released a new processor for consumer computers.",
+        verification_status=VerificationStatus.VERIFIED,
+        verification_score=90,
+        post_content="💻 A technology company released a new processor.\nThe product is intended for consumer computers.",
+        draft_status=DraftStatus.READY_FOR_REVIEW,
+        image_is_synthetic=True,
+        image_provenance="pollinations_ai",
+        image_credit="Pollinations.ai",
+    )
     image_path = tmp_path / "card.jpg"
     image_path.write_bytes(b"image")
 
@@ -92,3 +102,16 @@ def test_synthetic_image_disclosure_is_added_to_facebook_caption(tmp_path):
         publish_post_with_image(story, image_path)
 
     assert "AI-generated illustration" in publish.call_args.args[0]
+
+
+def test_publisher_stops_sensitive_synthetic_news_image(tmp_path):
+    story = _powerful_provisional_story()
+    story.verification_status = VerificationStatus.VERIFIED
+    story.verification_score = 90
+    story.image_is_synthetic = True
+    story.image_provenance = "pollinations_ai"
+    image_path = tmp_path / "earthquake.jpg"
+    image_path.write_bytes(b"image")
+
+    with pytest.raises(FacebookPublishError, match="Meta policy review required"):
+        publish_post_with_image(story, image_path)

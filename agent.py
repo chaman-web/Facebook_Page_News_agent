@@ -80,6 +80,12 @@ from pipeline.final_quality_check import FinalQualityError, final_quality_check
 from pipeline.generator import generate_post
 from pipeline.high_value_backlog import pending_stories, remember, resolve
 from pipeline.log_retention import retained_log_handler
+from pipeline.meta_policy_gate import (
+    PolicyDecision,
+    apply_policy_verdict,
+    evaluate_meta_policy,
+    record_policy_decision,
+)
 from pipeline.observability import RUN_ID, add_run_id, write_daily_summary
 from pipeline.posting_queue import HARD_DAILY_CEILING, PostingQueue, Route
 from pipeline.clusterer import cluster_stories
@@ -492,7 +498,28 @@ def fetch_and_build(
                 save_draft(story)
                 continue
 
-        # 6f — Final quality check
+        # 6f — Meta policy gate
+        if not dry_run:
+            policy_verdict = evaluate_meta_policy(story, image_path=image_path)
+            apply_policy_verdict(story, policy_verdict)
+            if policy_verdict.decision == PolicyDecision.BLOCK:
+                story.draft_status = DraftStatus.REJECTED
+                story.rejection_reason = policy_verdict.reason
+                save_draft(story)
+                record_policy_decision(story, policy_verdict, "BLOCKED")
+                logger.warning("⛔ Meta policy block: %s | %s", story.title[:60], policy_verdict.reason)
+                continue
+            if policy_verdict.decision == PolicyDecision.REVIEW:
+                story.draft_status = DraftStatus.POLICY_REVIEW
+                story.rejection_reason = None
+                save_draft(story)
+                record_policy_decision(story, policy_verdict, "SAVED_FOR_REVIEW")
+                review_drafts += 1
+                metrics["review_drafts"] = review_drafts
+                accounted_high_impact_urls.add(story.source_url)
+                logger.warning("🛡️ Meta policy review required: %s | %s", story.title[:60], policy_verdict.reason)
+                continue
+        # 6g — Final quality check
         if not dry_run:
             try:
                 final_quality_check(story, image_path=image_path)
@@ -502,6 +529,7 @@ def fetch_and_build(
                 story.rejection_reason = str(exc)
                 save_draft(story)
                 continue
+            record_policy_decision(story, policy_verdict, "ELIGIBLE")
 
         if not dry_run:
             # Persist the evidence-rich verified draft before it enters the
@@ -742,6 +770,10 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             verification_status = VerificationStatus.VERIFIED,
             verification_score  = entry.verification_score,
             verification_reason = entry.verification_reason,
+            policy_decision = entry.policy_decision,
+            policy_categories = entry.policy_categories or [],
+            policy_reasons = entry.policy_reasons or [],
+            policy_version = entry.policy_version,
         )
 
         image_path = Path(entry.image_path) if entry.image_path else None
@@ -756,6 +788,16 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.warning("No post content in queue entry for '%s' — skipping.", entry.title[:50])
             queue.mark_skipped(entry, "no post content in queue entry")
             failed_count += 1
+            continue
+
+        policy_verdict = evaluate_meta_policy(story, image_path=image_path)
+        apply_policy_verdict(story, policy_verdict)
+        if policy_verdict.decision != PolicyDecision.PASS:
+            reason = policy_verdict.reason or "Meta policy review is required."
+            logger.warning("🛡️ Policy review required — not publishing: %s | %s", entry.title[:60], reason)
+            queue.mark_review_required(entry, reason)
+            metrics["review_required"] += 1
+            record_policy_decision(story, policy_verdict, "QUEUE_REVIEW")
             continue
 
         # The evidence-rich draft was already saved during the fetch stage.

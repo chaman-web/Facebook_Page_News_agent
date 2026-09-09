@@ -22,6 +22,7 @@ class VerificationStatus(str, Enum):
 class DraftStatus(str, Enum):
     DRAFT = "DRAFT"
     READY_FOR_REVIEW = "READY_FOR_REVIEW"
+    POLICY_REVIEW = "POLICY_REVIEW"
     REJECTED = "REJECTED"
 
 
@@ -64,6 +65,10 @@ class Story:
     image_provenance: str = ""
     image_credit: str = ""
     image_is_synthetic: bool = False
+    policy_decision: str = ""
+    policy_categories: list[str] = field(default_factory=list)
+    policy_reasons: list[str] = field(default_factory=list)
+    policy_version: str = ""
 
     # --- Draft ---
     draft_status: DraftStatus = DraftStatus.DRAFT

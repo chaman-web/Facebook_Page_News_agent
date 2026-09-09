@@ -94,3 +94,17 @@ class TestSaveDraft:
         data = json.loads(Path(path).read_text())
         assert data["draft_status"] == DraftStatus.REJECTED.value
         assert data["rejection_reason"] == "Source is unreliable."
+
+    def test_policy_review_story_keeps_protected_status(self, tmp_path):
+        story = _story()
+        story.draft_status = DraftStatus.POLICY_REVIEW
+        story.policy_decision = "REVIEW"
+        story.policy_categories = ["graphic_violence"]
+        story.policy_reasons = ["Potentially graphic description."]
+        story.policy_version = "2026-09"
+        with patch("config.DRAFTS_DIR", str(tmp_path)):
+            path = save_draft(story)
+
+        data = json.loads(Path(path).read_text())
+        assert data["draft_status"] == DraftStatus.POLICY_REVIEW.value
+        assert data["policy_categories"] == ["graphic_violence"]

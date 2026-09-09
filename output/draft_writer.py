@@ -29,7 +29,7 @@ def save_draft(story: Story) -> str:
     # Only independently verified stories are ready for review/publishing.
     # Powerful single-source stories remain DRAFT so they are preserved without
     # entering the automatic publishing path.
-    if story.draft_status == DraftStatus.REJECTED:
+    if story.draft_status in {DraftStatus.REJECTED, DraftStatus.POLICY_REVIEW}:
         pass
     elif story.verification_status == VerificationStatus.VERIFIED:
         story.draft_status = DraftStatus.READY_FOR_REVIEW
@@ -88,6 +88,10 @@ def _write_json(story: Story, path: Path) -> None:
         "image_provenance": story.image_provenance,
         "image_credit": story.image_credit,
         "image_is_synthetic": story.image_is_synthetic,
+        "policy_decision": story.policy_decision,
+        "policy_categories": story.policy_categories,
+        "policy_reasons": story.policy_reasons,
+        "policy_version": story.policy_version,
         "draft_status": story.draft_status.value,
         "rejection_reason": story.rejection_reason,
         "generated_at": story.generated_at.isoformat() if story.generated_at else None,
@@ -99,6 +103,7 @@ def _write_markdown(story: Story, path: Path) -> None:
     status_banner = {
         DraftStatus.READY_FOR_REVIEW: "✅ READY FOR REVIEW",
         DraftStatus.DRAFT: "📝 DRAFT — Awaiting review",
+        DraftStatus.POLICY_REVIEW: "🛡️ POLICY REVIEW REQUIRED",
         DraftStatus.REJECTED: "❌ REJECTED",
     }.get(story.draft_status, story.draft_status.value)
 
@@ -119,6 +124,15 @@ def _write_markdown(story: Story, path: Path) -> None:
     rejection_md = ""
     if story.rejection_reason:
         rejection_md = f"\n**Rejection reason:** {story.rejection_reason}\n"
+
+    policy_md = ""
+    if story.policy_decision:
+        policy_md = (
+            f"\n**Meta policy:** {story.policy_decision} "
+            f"({story.policy_version or 'unversioned'})  \n"
+            f"**Policy categories:** {', '.join(story.policy_categories) or 'None'}  \n"
+            f"**Policy reasons:** {'; '.join(story.policy_reasons) or 'None'}\n"
+        )
 
     hashtags_str = " ".join(story.hashtags) if story.hashtags else "_None_"
 
@@ -142,7 +156,7 @@ def _write_markdown(story: Story, path: Path) -> None:
 | Verification score | {story.verification_score:.0f}/100 |
 | Generated | {generated} |
 
-{corroborating_md}{rejection_md}
+{corroborating_md}{rejection_md}{policy_md}
 **Verification reason:** {story.verification_reason or "Not recorded."}
 
 ---
