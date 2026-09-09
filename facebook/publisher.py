@@ -24,7 +24,7 @@ from models import DraftStatus, Story, VerificationStatus
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API_URL = "https://graph.facebook.com/v19.0"
+GRAPH_API_URL = f"https://graph.facebook.com/{config.FACEBOOK_GRAPH_API_VERSION}"
 
 
 class FacebookPublishError(Exception):
@@ -120,6 +120,8 @@ def _publish(story: Story, image_path: Optional[Path]) -> str:
 
     clean_content = _clean_text(story.post_content)
     message = _format_post(clean_content, story.hashtags)
+    if getattr(story, "image_is_synthetic", False) and "ai-generated illustration" not in message.lower():
+        message = f"{message}\n\nℹ️ Image: AI-generated illustration."
 
     # Validate / refresh token before publishing
     try:

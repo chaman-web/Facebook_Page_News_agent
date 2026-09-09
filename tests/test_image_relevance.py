@@ -8,6 +8,7 @@ from image.maker import (
     _context_line,
     _fallback_background,
     _fetch_article_photo,
+    _apply_image_provenance,
     _image_description_matches,
     _smart_crop,
     _source_display_name,
@@ -28,12 +29,48 @@ def test_article_photo_is_preferred_when_available():
         published_at=datetime.now(timezone.utc),
         raw_summary="Canada introduced new tariffs.",
         article_image_url="https://example.com/authentic.jpg",
+        article_image_reuse_permitted=True,
     )
     expected = Image.new("RGB", (1200, 800))
     with patch("image.maker._download", return_value=expected) as download:
         result = _fetch_article_photo(story)
     assert result is expected
     download.assert_called_once_with(story.article_image_url)
+
+
+def test_article_photo_requires_recorded_reuse_permission():
+    story = Story(
+        title="Publisher image has unknown rights",
+        source_name="News Publisher",
+        source_url="https://publisher.example/story",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="A verified report.",
+        article_image_url="https://publisher.example/photo.jpg",
+    )
+    with patch("image.maker._download") as download:
+        assert _fetch_article_photo(story) is None
+    download.assert_not_called()
+
+
+def test_synthetic_image_provenance_is_attached_to_story():
+    story = Story(
+        title="Synthetic illustration test",
+        source_name="Reuters",
+        source_url="https://reuters.com/test",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="A verified report.",
+    )
+    image = Image.new("RGB", (1200, 1500))
+    image.info.update({
+        "image_provenance": "pollinations_ai",
+        "image_credit": "Pollinations.ai",
+        "image_is_synthetic": True,
+    })
+
+    _apply_image_provenance(story, image)
+
+    assert story.image_provenance == "pollinations_ai"
+    assert story.image_is_synthetic is True
 
 
 def test_local_fallback_always_creates_an_image_card(tmp_path, monkeypatch):

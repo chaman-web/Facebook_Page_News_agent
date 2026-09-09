@@ -30,6 +30,9 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         source_tier=1,
         verification_status=VerificationStatus.VERIFIED,
         verification_score=90,
+        image_provenance="pollinations_ai",
+        image_credit="Pollinations.ai",
+        image_is_synthetic=True,
     )
 
     with (
@@ -52,6 +55,8 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         assert entry.impact_score == 10
         assert entry.impact_reasons == ["population-policy", "critical-infrastructure"]
         assert entry.routing_reason == "impact score >= 10"
+        assert entry.image_provenance == "pollinations_ai"
+        assert entry.image_is_synthetic is True
 
 
 def test_expire_stale_persists_all_required_downgrades(tmp_path):

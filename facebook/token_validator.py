@@ -21,7 +21,7 @@ from facebook.token_manager import TokenExpiredError, TokenManager
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API_URL = "https://graph.facebook.com/v19.0"
+GRAPH_API_URL = f"https://graph.facebook.com/{config.FACEBOOK_GRAPH_API_VERSION}"
 _VALIDATION_TIMEOUT = 6   # seconds — fast fail, don't block the run
 
 

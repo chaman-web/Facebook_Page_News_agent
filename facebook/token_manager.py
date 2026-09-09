@@ -28,7 +28,7 @@ import config
 
 logger = logging.getLogger(__name__)
 
-GRAPH_API_URL = "https://graph.facebook.com/v19.0"
+GRAPH_API_URL = f"https://graph.facebook.com/{config.FACEBOOK_GRAPH_API_VERSION}"
 ENV_PATH = config.ENV_PATH
 
 # Tokens with more than this many seconds remaining are considered valid

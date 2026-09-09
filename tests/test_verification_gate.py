@@ -2,12 +2,13 @@
 
 import os
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
 os.environ.setdefault("NEWSAPI_KEY", "test-key")
 
-from facebook.publisher import FacebookPublishError, publish_post  # noqa: E402
+from facebook.publisher import FacebookPublishError, publish_post, publish_post_with_image  # noqa: E402
 from agent import _select_verified_and_provisional  # noqa: E402
 from models import DraftStatus, Story, VerificationStatus  # noqa: E402
 from pipeline.editorial_scorer import score_story  # noqa: E402
@@ -72,3 +73,22 @@ def test_selection_keeps_verified_and_provisional_candidates_separately():
         VerificationStatus.VERIFIED,
         VerificationStatus.UNVERIFIED,
     ]
+
+
+def test_synthetic_image_disclosure_is_added_to_facebook_caption(tmp_path):
+    story = _powerful_provisional_story()
+    story.verification_status = VerificationStatus.VERIFIED
+    story.verification_score = 90
+    story.image_is_synthetic = True
+    image_path = tmp_path / "card.jpg"
+    image_path.write_bytes(b"image")
+
+    with (
+        patch("facebook.publisher.config.FACEBOOK_PAGE_ID", "page-1"),
+        patch("facebook.publisher.config.FACEBOOK_PAGE_TOKEN", "token"),
+        patch("facebook.publisher.TokenManager.get_valid_token", return_value="token"),
+        patch("facebook.publisher._publish_with_photo", return_value="post-1") as publish,
+    ):
+        publish_post_with_image(story, image_path)
+
+    assert "AI-generated illustration" in publish.call_args.args[0]

@@ -51,6 +51,7 @@ class Story:
     verification_evidence: list[dict] = field(default_factory=list)
     article_text: str = ""
     article_image_url: str | None = None
+    article_image_reuse_permitted: bool = False
     region: str = "global"
     priority_protected: bool = False
 
@@ -60,6 +61,9 @@ class Story:
     card_description: str | None = None  # distinct, grounded detail shown above the logo
     hashtags: list[str] = field(default_factory=list)
     category: str = "breaking"  # news category slug
+    image_provenance: str = ""
+    image_credit: str = ""
+    image_is_synthetic: bool = False
 
     # --- Draft ---
     draft_status: DraftStatus = DraftStatus.DRAFT

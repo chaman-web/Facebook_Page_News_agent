@@ -214,6 +214,9 @@ class QueueEntry:
     status:         str           = "QUEUED"   # QUEUED | REVIEW_REQUIRED | PUBLISHED | SKIPPED | EXPIRED
     downgraded_from: Optional[str] = None      # original lane before TTL downgrade
     image_path:     Optional[str] = None       # pre-rendered image card path (set before queue)
+    image_provenance: str         = ""
+    image_credit:     str         = ""
+    image_is_synthetic: bool      = False
     post_content:   Optional[str] = None       # pre-generated Facebook post copy
     card_headline:  Optional[str] = None       # AI-generated punchy card headline
     hashtags:       Optional[list] = None      # pre-generated hashtags
@@ -305,6 +308,9 @@ class PostingQueue:
             category_tier = tier_num,
             route         = lane.value,
             image_path    = str(image_path) if image_path else None,
+            image_provenance = getattr(story, "image_provenance", ""),
+            image_credit = getattr(story, "image_credit", ""),
+            image_is_synthetic = bool(getattr(story, "image_is_synthetic", False)),
             post_content  = post_content,
             card_headline = card_headline,
             hashtags      = hashtags,
@@ -545,6 +551,9 @@ class PostingQueue:
                 category_tier=effective_tier,
                 route=Route.PUBLISH_NOW.value,
                 image_path=str(image_path),
+                image_provenance=getattr(story, "image_provenance", ""),
+                image_credit=getattr(story, "image_credit", ""),
+                image_is_synthetic=bool(getattr(story, "image_is_synthetic", False)),
                 post_content=story.post_content,
                 card_headline=story.card_headline,
                 hashtags=story.hashtags,
@@ -1014,6 +1023,9 @@ class PostingQueue:
                 e.setdefault("route",            Route.SCHEDULE.value)
                 e.setdefault("downgraded_from",  None)
                 e.setdefault("image_path",       None)
+                e.setdefault("image_provenance", "")
+                e.setdefault("image_credit",     "")
+                e.setdefault("image_is_synthetic", False)
                 e.setdefault("post_content",     None)
                 e.setdefault("card_headline",    None)
                 e.setdefault("hashtags",         None)

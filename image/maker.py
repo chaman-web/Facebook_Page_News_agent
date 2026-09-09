@@ -300,7 +300,10 @@ def create_news_image(story: Story) -> Optional[Path]:
     # Three search strategies — each tries a different keyword to get a different photo.
     # Fetched lazily so we only call Pexels when the previous attempt failed.
     search_strategies = []
-    if getattr(story, "article_image_url", None):
+    if (
+        getattr(story, "article_image_url", None)
+        and getattr(story, "article_image_reuse_permitted", False)
+    ):
         search_strategies.append(lambda: _fetch_article_photo(story))
     search_strategies.extend([
         lambda: _fetch_photo(story),
@@ -314,6 +317,8 @@ def create_news_image(story: Story) -> Optional[Path]:
         if current_photo is None:
             logger.warning("Image fetch strategy %d returned nothing — skipping.", attempt + 1)
             continue
+
+        _apply_image_provenance(story, current_photo)
 
         image  = _compose(current_photo, story, strong_gradients=False)
         issues = _mobile_visibility_check(image, story, raw_photo=current_photo)
@@ -342,6 +347,9 @@ def create_news_image(story: Story) -> Optional[Path]:
 def create_fallback_card(story: Story) -> Path:
     """Create a guaranteed, story-aware card when no external image is available."""
     config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    story.image_provenance = "branded_fallback"
+    story.image_credit = "Global Pulse News"
+    story.image_is_synthetic = False
     background = _fallback_background(story)
     card = _compose(background, story, strong_gradients=False)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
@@ -703,11 +711,24 @@ def _fetch_article_photo(story: Story) -> Optional[Image.Image]:
     url = getattr(story, "article_image_url", None)
     if not url:
         return None
+    if not getattr(story, "article_image_reuse_permitted", False):
+        logger.warning("Article image skipped because reuse permission is not recorded: %s", url)
+        return None
     logger.info("Trying article image from %s", story.source_name)
     image = _download(url)
     if image:
+        image.info["image_provenance"] = "licensed_article_image"
+        image.info["image_credit"] = story.source_name
+        image.info["image_is_synthetic"] = False
         logger.info("Using authentic article image from %s", story.source_name)
     return image
+
+
+def _apply_image_provenance(story: Story, image: Image.Image) -> None:
+    """Copy provider metadata onto the story before composing or queueing."""
+    story.image_provenance = str(image.info.get("image_provenance", "unknown"))
+    story.image_credit = str(image.info.get("image_credit", ""))
+    story.image_is_synthetic = bool(image.info.get("image_is_synthetic", False))
 
 
 def _relevance_terms(text: str) -> set[str]:
@@ -793,7 +814,12 @@ def _pexels(query: str, page: int = 1) -> Optional[Image.Image]:
         chosen = relevant[0]
         url = chosen["src"]["large2x"]
         logger.info("Pexels relevant image (page %d) by %s", page, chosen.get("photographer", "unknown"))
-        return _download(url)
+        image = _download(url)
+        if image:
+            image.info["image_provenance"] = "pexels"
+            image.info["image_credit"] = chosen.get("photographer", "Pexels")
+            image.info["image_is_synthetic"] = False
+        return image
     except Exception as exc:
         logger.warning("Pexels error: %s", exc)
         return None
@@ -809,7 +835,12 @@ def _pollinations(title: str) -> Optional[Image.Image]:
             f"?width={IMAGE_WIDTH}&height={IMAGE_HEIGHT}&nologo=true"
         )
         logger.info("Generating image via Pollinations.ai...")
-        return _download(url, timeout=30)
+        image = _download(url, timeout=30)
+        if image:
+            image.info["image_provenance"] = "pollinations_ai"
+            image.info["image_credit"] = "Pollinations.ai"
+            image.info["image_is_synthetic"] = True
+        return image
     except Exception as exc:
         logger.error("Pollinations.ai error: %s", exc)
         return None
@@ -869,6 +900,15 @@ def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -
     draw.rectangle([(bx1, by1), (bx2, by2)], fill=NAVY_LIGHT)
     draw.rectangle([(bx1, by1), (bx1 + 5, by2)], fill=WHITE)
     draw.text((bx1 + lbl_px, by1 + lbl_py), label, font=lbl_font, fill=WHITE)
+
+    if getattr(story, "image_is_synthetic", False):
+        disclosure = "AI-GENERATED ILLUSTRATION"
+        disclosure_font = _font("Montserrat-Bold.ttf", 18)
+        disclosure_w = int(draw.textlength(disclosure, font=disclosure_font))
+        dx2 = IMAGE_WIDTH - MR
+        dx1 = dx2 - disclosure_w - 28
+        draw.rectangle([(dx1, MT), (dx2, MT + 38)], fill=(0, 0, 0))
+        draw.text((dx1 + 14, MT + 8), disclosure, font=disclosure_font, fill=WHITE)
 
     headline = getattr(story, "card_headline", None) or _short_headline(story.title)
     impact_words = _find_impact_words(headline)
