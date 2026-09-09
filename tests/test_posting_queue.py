@@ -165,6 +165,53 @@ def test_regular_queue_is_global_score_first_and_retries_are_preserved(tmp_path)
         queue.mark_retry(higher, "temporary Graph API failure")
         assert higher.status == "QUEUED"
         assert higher.publish_attempts == 1
+        assert higher.next_retry_at is not None
+        assert queue.deserves_publishing(higher, None)[0] is False
+
+
+def test_tier2_age_bonus_only_reorders_near_equal_scores(tmp_path):
+    now = datetime.now(timezone.utc)
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        older = QueueEntry("Older", "A", "https://a.test/old", "world", 72,
+                           (now - timedelta(hours=24)).isoformat())
+        newer = QueueEntry("Newer", "B", "https://b.test/new", "world", 73,
+                           now.isoformat())
+        assert queue.effective_tier2_score(older, now) == 74
+        assert min([older, newer], key=queue.priority_key) is older
+
+
+def test_fresh_reconciliation_demotes_tier1_and_rejects_below_floor(tmp_path):
+    now = datetime.now(timezone.utc)
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    story = Story("Developing event", "Reuters", "https://r.test/event", now,
+                  "A developing verified event.", verification_status=VerificationStatus.VERIFIED,
+                  verification_score=90)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        queue.add(story, 85, impact_score=10)
+        assert queue.reconcile_candidate(story, 74, impact_score=0)
+        assert queue._entries[0].route == Route.SCHEDULE.value
+        assert queue.reconcile_candidate(story, 60, impact_score=0)
+        assert queue._entries[0].status == "EXPIRED"
+
+
+def test_tier1_priority_prefers_impact_then_freshness(tmp_path):
+    now = datetime.now(timezone.utc)
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        lower_impact = QueueEntry("A", "A", "https://a.test", "world", 99, now.isoformat(),
+                                  route=Route.PUBLISH_NOW.value, impact_score=10,
+                                  source_published_at=now.isoformat())
+        higher_impact = QueueEntry("B", "B", "https://b.test", "world", 82, now.isoformat(),
+                                   route=Route.PUBLISH_NOW.value, impact_score=12,
+                                   source_published_at=(now - timedelta(hours=1)).isoformat())
+        assert min([lower_impact, higher_impact], key=queue.priority_key) is higher_impact
 
 
 def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):

@@ -53,7 +53,8 @@ $trigger2 = New-ScheduledTaskTrigger `
 $settings2 = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
     -StartWhenAvailable `
-    -RunOnlyIfNetworkAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
     -MultipleInstances IgnoreNew
 
 Register-ScheduledTask `
@@ -66,5 +67,12 @@ Register-ScheduledTask `
     -ErrorAction Stop
 
 Write-Host "OK Job 2 registered - every 10 minutes"
+
+# Remove the temporary per-user task used when the existing elevated task
+# could not be updated without an administrator session.
+Unregister-ScheduledTask `
+    -TaskName "GlobalPulseNews_Job2_Publish_10Min" `
+    -Confirm:$false `
+    -ErrorAction SilentlyContinue
 Write-Host ""
 Write-Host "Done. Open taskschd.msc to verify."

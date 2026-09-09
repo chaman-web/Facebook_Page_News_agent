@@ -199,6 +199,7 @@ class QueueEntry:
     source_published_at: Optional[str] = None
     publish_attempts: int = 0
     last_publish_error: str = ""
+    next_retry_at: Optional[str] = None
 
     @property
     def route_enum(self) -> Route:
@@ -358,6 +359,11 @@ class PostingQueue:
         """Apply the two-tier timing, priority and daily-limit rules."""
         now = datetime.now(timezone.utc)
         lane = entry.route_enum
+        if entry.next_retry_at:
+            retry_at = datetime.fromisoformat(entry.next_retry_at)
+            if retry_at > now:
+                minutes = max(1, int((retry_at - now).total_seconds() / 60))
+                return False, f"Publish retry backoff — {minutes}m remaining"
         ttl_result = self._check_ttl(entry, now)
         if ttl_result is not None:
             return ttl_result
@@ -391,7 +397,7 @@ class PostingQueue:
         queued = [e for e in self._entries if e.status == "QUEUED"]
         if not queued:
             return None
-        queued.sort(key=lambda e: (e.route_enum.priority, -e.score))
+        queued.sort(key=self.priority_key)
         for entry in queued:
             ok, reason = self.deserves_publishing(entry, last_published_at, last_breaking_at)
             if ok:
@@ -435,6 +441,8 @@ class PostingQueue:
         entry.status       = "PUBLISHED"
         entry.published_at = datetime.now(timezone.utc).isoformat()
         entry.facebook_post_id = post_id
+        entry.next_retry_at = None
+        entry.last_publish_error = ""
         self._audit(
             entry.title, entry.score, entry.category_tier,
             entry.route_enum, "PUBLISHED",
@@ -529,9 +537,63 @@ class PostingQueue:
         entry.status = "QUEUED"
         entry.publish_attempts += 1
         entry.last_publish_error = reason
+        delay_minutes = min(10 * (2 ** (entry.publish_attempts - 1)), 120)
+        entry.next_retry_at = (
+            datetime.now(timezone.utc) + timedelta(minutes=delay_minutes)
+        ).isoformat()
         self._audit(entry.title, entry.score, entry.category_tier,
-                    entry.route_enum, "RETRY", reason)
+                    entry.route_enum, "RETRY", f"{reason}; retry in {delay_minutes}m")
         self._save()
+
+    def reconcile_candidate(
+        self,
+        story: Story,
+        score: float,
+        impact_score: float = 0.0,
+        impact_reasons: Optional[list] = None,
+    ) -> bool:
+        """Safely demote or hold a queued candidate when fresh scoring weakens it."""
+        entry = next((e for e in self._entries if e.source_url == story.source_url and e.status == "QUEUED"), None)
+        if entry is None:
+            return False
+        previous_route = entry.route
+        desired = route_story(score, entry.category_tier, impact_score)
+        entry.score = score
+        entry.impact_score = float(impact_score or 0.0)
+        entry.impact_reasons = list(impact_reasons or [])
+        entry.verification_status = story.verification_status.value
+        entry.verification_score = float(story.verification_score or 0.0)
+        entry.verification_reason = story.verification_reason or ""
+        decision = "RECONCILED"
+        if story.verification_status != VerificationStatus.VERIFIED:
+            entry.status = "REVIEW_REQUIRED"
+            decision = "REVIEW_REQUIRED"
+        elif desired == Route.REJECT:
+            entry.status = "EXPIRED"
+            decision = "DEMOTED_BELOW_FLOOR"
+        elif entry.route_enum == Route.PUBLISH_NOW and desired != Route.PUBLISH_NOW:
+            entry.route = Route.SCHEDULE.value
+            entry.is_breaking = False
+            decision = "DEMOTED_TO_TIER_2"
+        self._audit(entry.title, score, entry.category_tier, entry.route_enum, decision,
+                    f"Fresh fetch reconciliation: {previous_route} -> {entry.route}; score={score:.1f}")
+        self._save()
+        return True
+
+    def effective_tier2_score(self, entry: QueueEntry, now: Optional[datetime] = None) -> float:
+        """Use a small bounded age bonus so near-equal Tier 2 stories do not starve."""
+        age_hours = max(0.0, entry.age(now).total_seconds() / 3600)
+        return entry.score + min(age_hours / 12.0, 2.0)
+
+    def priority_key(self, entry: QueueEntry) -> tuple:
+        """Stable ordering for both publishing tiers."""
+        if entry.route_enum == Route.PUBLISH_NOW:
+            try:
+                freshness = -datetime.fromisoformat(entry.source_published_at or entry.queued_at).timestamp()
+            except (TypeError, ValueError):
+                freshness = 0.0
+            return (0, -entry.impact_score, freshness, -entry.verification_score, -entry.score, entry.queued_at)
+        return (1, -self.effective_tier2_score(entry), -entry.score, entry.queued_at)
 
     def mark_review_required(self, entry: QueueEntry, reason: str = "") -> None:
         """Remove an unverified legacy entry from automatic publishing."""
@@ -796,7 +858,7 @@ class PostingQueue:
         ]
         if not regular:
             return True
-        best = min(regular, key=lambda e: (-e.score, e.queued_at))
+        best = min(regular, key=self.priority_key)
         return entry.source_url == best.source_url
 
     def window_slot_picks(self) -> list[QueueEntry]:
@@ -961,6 +1023,7 @@ class PostingQueue:
                 e.setdefault("source_published_at", e.get("queued_at"))
                 e.setdefault("publish_attempts", 0)
                 e.setdefault("last_publish_error", "")
+                e.setdefault("next_retry_at", None)
                 e.setdefault(
                     "verification_reason",
                     "Legacy queue entry has no independent-source verification evidence.",

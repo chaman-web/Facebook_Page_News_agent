@@ -76,7 +76,7 @@ from output.draft_writer import save_draft
 from pipeline.content_validator import ContentValidationError, validate_post
 from pipeline.deduplicator import filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
-from pipeline.editorial_scorer import EditorialTier, score_and_filter
+from pipeline.editorial_scorer import EditorialTier, score_and_filter, score_story
 from pipeline.final_quality_check import FinalQualityError, final_quality_check
 from pipeline.generator import generate_post, reset_generation_backend_state
 from pipeline.high_value_backlog import pending_stories, remember, resolve
@@ -331,6 +331,20 @@ def fetch_and_build(
     # STAGE 4 — EDITORIAL SCORING
     # ==========================================================================
     logger.info("── STAGE 4: Editorial Scoring ──────────────────")
+    # Refresh the state of already queued stories before selecting new work.
+    # Promotions wait for the rebuilt post below; demotions and verification
+    # regressions take effect immediately so stale priority is never retained.
+    queued_urls = {entry.source_url for entry in queue._entries if entry.status == "QUEUED"}
+    for candidate in verification_candidates:
+        if candidate.source_url not in queued_urls:
+            continue
+        refreshed_score = score_story(candidate)
+        queue.reconcile_candidate(
+            candidate,
+            refreshed_score.total,
+            impact_score=refreshed_score.impact_score,
+            impact_reasons=list(refreshed_score.impact_reasons),
+        )
     # A verified HOLD-tier story must remain available for selection even when
     # a higher-scoring provisional story exists. Verification and editorial
     # strength are separate lanes; otherwise provisional breaking content can
@@ -589,6 +603,12 @@ def fetch_and_build(
         item for item in ready_posts
         if item[0].total >= 80 or item[0].impact_score >= 10
     ]
+    immediate_posts.sort(key=lambda item: (
+        -item[0].impact_score,
+        -item[1].published_at.timestamp(),
+        -float(item[1].verification_score or 0.0),
+        -item[0].total,
+    ))
     scheduled_posts = [item for item in ready_posts if item not in immediate_posts]
 
     if dry_run:
@@ -795,7 +815,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     last_breaking_at:  datetime | None = queue.last_breaking_published_at()
 
     # Sort queue: highest priority first
-    queued.sort(key=lambda e: (e.route_enum.priority, -e.score))
+    queued.sort(key=queue.priority_key)
 
     publish_limit = count if count > 0 else len(queued)
 
@@ -983,7 +1003,7 @@ def main(
         queue._audit = lambda *args, **kwargs: None
         queue.expire_stale()
         queued = [e for e in queue._entries if e.status == "QUEUED"]
-        queued.sort(key=lambda e: (e.route_enum.priority, -e.score))
+        queued.sort(key=queue.priority_key)
         logger.info("Queue after TTL checks: %s", queue.summary())
         if not queued:
             logger.info("Queue is empty — nothing to publish.")
@@ -1102,7 +1122,7 @@ def _print_queue_status(queue: PostingQueue) -> None:
 
     entries = [e for e in queue._entries if e.status == "QUEUED"]
     if entries:
-        entries.sort(key=lambda e: (e.route_enum.priority, -e.score, e.queued_at))
+        entries.sort(key=queue.priority_key)
         for i, e in enumerate(entries[:10], 1):
             tier_icon = "🔴" if e.route_enum == Route.PUBLISH_NOW else "🟡"
             logger.info(
