@@ -155,3 +155,21 @@ def test_shared_feed_is_fetched_only_once_per_job():
 
     assert [item.source_url for item in stories] == [story.source_url]
     fetch.assert_not_called()
+
+
+def test_repeated_failure_warnings_are_grouped(tmp_path, caplog):
+    health_file = tmp_path / "health.json"
+    url = "https://feed.example/rss"
+    now = datetime(2026, 9, 9, 8, 0, tzinfo=timezone.utc)
+    with (
+        patch.object(source_health, "HEALTH_FILE", health_file),
+        patch.object(source_health, "_utcnow", return_value=now),
+        caplog.at_level("WARNING"),
+    ):
+        source_health.record_failure(url, "connection error")
+        source_health.record_failure(url, "connection error")
+
+    warnings = [record.message for record in caplog.records if "endpoint failure" in record.message]
+    assert len(warnings) == 1
+    state = json.loads(health_file.read_text(encoding="utf-8"))
+    assert state[url]["suppressed_failure_logs"] == 1

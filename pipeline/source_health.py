@@ -23,6 +23,7 @@ DUPLICATE_THRESHOLD = 0.8
 # Progressive temporary cooldowns. Nothing is permanently disabled.
 COOLDOWN_MINUTES = (5, 15, 60, 360, 1440)
 IMPORTANT_COOLDOWN_CAP_MINUTES = 360
+FAILURE_LOG_INTERVAL_MINUTES = 60
 
 
 def is_banned(feed_url: str) -> bool:
@@ -96,14 +97,19 @@ def record_failure(feed_url: str, reason: str) -> None:
         _start_cooldown(feed_url, entry)
     else:
         entry["status"] = "DEGRADED"
-        logger.warning(
-            "Source endpoint failure %d/%d — %s | type=%s | %s",
-            count,
-            threshold,
-            feed_url,
-            failure_type,
-            reason,
-        )
+        if _should_log_failure(previous, failure_type):
+            entry["last_logged_failure"] = _utcnow().isoformat()
+            entry["last_logged_failure_type"] = failure_type
+            logger.warning(
+                "Source endpoint failure %d/%d — %s | type=%s | %s",
+                count,
+                threshold,
+                feed_url,
+                failure_type,
+                reason,
+            )
+        else:
+            entry["suppressed_failure_logs"] = int(previous.get("suppressed_failure_logs", 0)) + 1
 
     data[feed_url] = entry
     _save(data)
@@ -128,7 +134,11 @@ def record_success(feed_url: str) -> None:
     data[feed_url] = entry
     _save(data)
     if was_degraded:
-        logger.info("✅ Source endpoint recovered automatically — %s", feed_url)
+        logger.info(
+            "✅ Source endpoint recovered automatically — %s | repeated logs grouped=%d",
+            feed_url,
+            int(previous.get("suppressed_failure_logs", 0)),
+        )
 
 
 def record_duplicates(feed_url: str, total: int, duplicates: int) -> None:
@@ -216,13 +226,15 @@ def _start_cooldown(feed_url: str, entry: dict) -> None:
             "next_probe_at": (now + timedelta(minutes=probe_in)).isoformat(),
         }
     )
+    grouped = int(entry.pop("suppressed_failure_logs", 0))
     logger.warning(
-        "⏳ Source endpoint cooling temporarily — %s | type=%s | failures=%d | cooldown=%dm | probe=%dm",
+        "⏳ Source endpoint cooling temporarily — %s | type=%s | failures=%d | cooldown=%dm | probe=%dm | repeated logs grouped=%d",
         feed_url,
         entry.get("failure_type", "unknown"),
         int(entry.get("consecutive_failures", 0)),
         duration,
         probe_in,
+        grouped,
     )
     if _is_important(feed_url) and duration >= 360:
         logger.error(
@@ -238,6 +250,15 @@ def _failure_threshold(feed_url: str, failure_type: str) -> int:
     if failure_type in {"not_found", "invalid_feed"}:
         return 3 if _is_important(feed_url) else 2
     return IMPORTANT_FAILURE_THRESHOLD if _is_important(feed_url) else FAILURE_THRESHOLD
+
+
+def _should_log_failure(previous: dict, failure_type: str) -> bool:
+    if previous.get("last_logged_failure_type") != failure_type:
+        return True
+    last_logged = _parse_time(previous.get("last_logged_failure"))
+    if last_logged is None:
+        return True
+    return _utcnow() - last_logged >= timedelta(minutes=FAILURE_LOG_INTERVAL_MINUTES)
 
 
 def _probe_interval_minutes(feed_url: str, entry: dict) -> int:

@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -46,6 +47,8 @@ from pathlib import Path
 import schedule
 
 import config
+from pipeline.log_retention import retained_log_handler
+from pipeline.observability import new_run_id, write_daily_summary
 
 logging.basicConfig(
     level=logging.INFO,
@@ -53,6 +56,13 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
+_scheduler_error_handler = retained_log_handler(config.LOGS_DIR / "scheduler_errors.log")
+_scheduler_error_handler.setLevel(logging.ERROR)
+_scheduler_error_handler.setFormatter(logging.Formatter(
+    "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+))
+logger.addHandler(_scheduler_error_handler)
 
 DEFAULT_PEAK_TIMES = config.PUBLISH_WINDOWS_LOCAL
 RUN_LOG_FILE       = config.RUN_LOG_PATH
@@ -80,6 +90,7 @@ def _is_run_active() -> bool:
 # ---------------------------------------------------------------------------
 
 def _log_run(
+    run_id: str,
     window:    str,
     start:     datetime,
     end:       datetime,
@@ -90,6 +101,7 @@ def _log_run(
     stop_reason: str,
 ) -> None:
     record = {
+        "run_id":      run_id,
         "window":      window,
         "start":       start.isoformat(),
         "end":         end.isoformat(),
@@ -105,6 +117,17 @@ def _log_run(
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as exc:
         logger.debug("Run log write failed: %s", exc)
+    if exit_code != 0:
+        try:
+            write_daily_summary(
+                "scheduler",
+                "failed",
+                {"window": window, "published": published, "failed": failed,
+                 "skipped": skipped, "exit_code": exit_code, "reason": stop_reason},
+                run_id=run_id,
+            )
+        except OSError as exc:
+            logger.error("[%s] Could not write scheduler failure summary: %s", run_id, exc)
 
 
 def _parse_run_stats(output: str) -> tuple[int, int, int]:
@@ -170,6 +193,7 @@ def _validate_token_quick() -> bool:
 def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> None:
     """Launch agent.py for one posting window with health check and run log."""
     global _active_process
+    run_id = new_run_id()
 
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
 
@@ -181,6 +205,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
             window_label,
         )
         _log_run(
+            run_id=run_id,
             window=window_label,
             start=datetime.now(timezone.utc),
             end=datetime.now(timezone.utc),
@@ -200,6 +225,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
                 window_label,
             )
             _log_run(
+                run_id=run_id,
                 window=window_label,
                 start=datetime.now(timezone.utc),
                 end=datetime.now(timezone.utc),
@@ -210,8 +236,8 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
             return
 
     logger.info(
-        "⏰ Window %s (%s) — publishing all 14 categories (%d per cat)...",
-        window_label, now_str, count,
+        "⏰ [%s] Window %s (%s) — publishing all 14 categories (%d per cat)...",
+        run_id, window_label, now_str, count,
     )
 
     cmd = [sys.executable, str(config.PROJECT_ROOT / "agent.py"), "--all-categories", f"--count={count}"]
@@ -231,6 +257,8 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
 
     try:
         with _active_process_lock:
+            child_env = os.environ.copy()
+            child_env["GLOBAL_PULSE_RUN_ID"] = run_id
             _active_process = subprocess.Popen(
                 cmd,
                 cwd=config.PROJECT_ROOT,
@@ -239,6 +267,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
                 text=True,
                 encoding="utf-8",
                 errors="replace",
+                env=child_env,
             )
 
         # Stream output line-by-line
@@ -286,6 +315,7 @@ def _run_window(window_label: str, count: int, image: bool, dry_run: bool) -> No
             window_label, duration // 60, duration % 60,
         )
         _log_run(
+            run_id=run_id,
             window=window_label,
             start=start_time,
             end=end_time,

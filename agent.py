@@ -80,23 +80,40 @@ from pipeline.final_quality_check import FinalQualityError, final_quality_check
 from pipeline.generator import generate_post
 from pipeline.high_value_backlog import pending_stories, remember, resolve
 from pipeline.log_retention import retained_log_handler
+from pipeline.observability import RUN_ID, add_run_id, write_daily_summary
 from pipeline.posting_queue import HARD_DAILY_CEILING, PostingQueue, Route
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
 
-_log_handlers: list[logging.Handler] = [logging.StreamHandler()]
+_log_handlers: list[logging.Handler] = [add_run_id(logging.StreamHandler())]
 config.LOGS_DIR.mkdir(parents=True, exist_ok=True)
 if "--fetch" in sys.argv:
-    _log_handlers.append(retained_log_handler(config.LOGS_DIR / "job1_fetch.log"))
+    _log_handlers.append(add_run_id(retained_log_handler(config.LOGS_DIR / "job1_fetch.log")))
+    _error_handler = retained_log_handler(config.LOGS_DIR / "job1_errors.log")
+    _error_handler.setLevel(logging.ERROR)
+    _log_handlers.append(add_run_id(_error_handler))
 elif "--publish" in sys.argv:
-    _log_handlers.append(retained_log_handler(config.LOGS_DIR / "job2_publish.log"))
+    _log_handlers.append(add_run_id(retained_log_handler(config.LOGS_DIR / "job2_publish.log")))
+    _error_handler = retained_log_handler(config.LOGS_DIR / "job2_errors.log")
+    _error_handler.setLevel(logging.ERROR)
+    _log_handlers.append(add_run_id(_error_handler))
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(asctime)s  [%(run_id)s]  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=_log_handlers,
 )
 logger = logging.getLogger(__name__)
+
+
+def _write_run_summary(job: str, status: str, metrics: dict, *, persist: bool = True) -> None:
+    compact = " | ".join(f"{key}={value}" for key, value in metrics.items())
+    logger.info("RUN SUMMARY [%s] %s | %s", status.upper(), job, compact)
+    if persist:
+        try:
+            write_daily_summary(job, status, metrics)
+        except OSError as exc:
+            logger.error("Could not write daily run summary: %s", exc)
 
 # Seconds to wait between Facebook posts (rate limit protection)
 POST_SLEEP_SECONDS = 60
@@ -148,6 +165,29 @@ def fetch_and_build(
     Nothing is published here.
     """
     queue = PostingQueue()
+    metrics = {
+        "fetched": 0,
+        "duplicates": 0,
+        "policy_rejected": 0,
+        "verification_rejected": 0,
+        "scoring_rejected": 0,
+        "ready": 0,
+        "queued": 0,
+        "published": 0,
+        "review_drafts": 0,
+        "high_impact_protected": 0,
+        "high_impact_missed": 0,
+    }
+    high_impact_urls: set[str] = set()
+    accounted_high_impact_urls: set[str] = set()
+
+    def finish(status: str, result: int) -> int:
+        if high_impact_urls:
+            backlog_urls = {story.source_url for story in pending_stories()}
+            accounted = accounted_high_impact_urls | backlog_urls
+            metrics["high_impact_missed"] = len(high_impact_urls - accounted)
+        _write_run_summary("fetch", status, metrics, persist=not dry_run)
+        return result
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("  Global Pulse News — Fetch & Build")
@@ -172,11 +212,11 @@ def fetch_and_build(
             raw_stories = fetch_news(limit=max(count * 10, 30), category=category)
     except NewsSourceError as exc:
         logger.error("Could not fetch news: %s", exc)
-        return 1
+        return finish("failed", 1)
 
     if not raw_stories:
         logger.warning("No stories returned from news sources.")
-        return 0
+        return finish("empty", 0)
 
     pending = pending_stories()
     if pending:
@@ -185,6 +225,7 @@ def fetch_and_build(
         logger.info("Restored %d protected high-value candidate(s).", len(pending))
 
     logger.info("Fetched %d candidate stories total.", len(raw_stories))
+    metrics["fetched"] = len(raw_stories)
     set_rss_pool(raw_stories)
 
     # ==========================================================================
@@ -194,7 +235,7 @@ def fetch_and_build(
     clustered_stories = cluster_stories(raw_stories)
     if not clustered_stories:
         logger.warning("No publishable clusters found after source quality filter.")
-        return 0
+        return finish("empty", 0)
     logger.info(
         "%d events identified from %d articles (avg %.1f sources/event).",
         len(clustered_stories), len(raw_stories),
@@ -210,9 +251,10 @@ def fetch_and_build(
         record_attempts=not dry_run,
     )
     logger.info("%d fresh stories after deduplication (%d duplicates removed).", len(fresh_stories), dup_count)
+    metrics["duplicates"] = dup_count
     if not fresh_stories:
         logger.warning("All stories were duplicates. Nothing to publish.")
-        return 0
+        return finish("empty", 0)
 
     # ==========================================================================
     # STAGE 2b — CONTENT POLICY GATE
@@ -230,9 +272,10 @@ def fetch_and_build(
         else:
             dnp_rejected += 1
     logger.info("DNP gate: %d passed | %d held | %d rejected.", len(dnp_passed), len(dnp_held), dnp_rejected)
+    metrics["policy_rejected"] = dnp_rejected
     if not dnp_passed:
         logger.warning("All stories blocked by DNP gate.")
-        return 0
+        return finish("empty", 0)
     fresh_stories = dnp_passed
 
     # ==========================================================================
@@ -257,9 +300,10 @@ def fetch_and_build(
         "%d stories passed source safety: %d verified | %d provisional | %d rejected.",
         len(verification_candidates), verified_count, provisional_count, rejected_count,
     )
+    metrics["verification_rejected"] = rejected_count
     if not verification_candidates:
         logger.warning("No stories passed verification.")
-        return 0
+        return finish("empty", 0)
 
     # ==========================================================================
     # STAGE 4 — EDITORIAL SCORING
@@ -279,10 +323,14 @@ def fetch_and_build(
         scored = score_and_filter(verification_candidates, allow_hold=True)
     if not scored:
         logger.warning("All stories scored below 60. Nothing to queue.")
-        return 0
+        metrics["scoring_rejected"] = len(verification_candidates)
+        return finish("empty", 0)
+    metrics["scoring_rejected"] = max(0, len(verification_candidates) - len(scored))
     for escore, story in scored:
         if escore.total >= 80 or escore.impact_score >= 10:
+            high_impact_urls.add(story.source_url)
             remember(story, escore.total, escore.impact_score)
+    metrics["high_impact_protected"] = len(high_impact_urls)
     logger.info(
         "Score distribution: %s",
         " | ".join(
@@ -333,6 +381,8 @@ def fetch_and_build(
     for escore, story in selected_scored:
         if dry_run and story.verification_status != VerificationStatus.VERIFIED:
             review_drafts += 1
+            metrics["review_drafts"] = review_drafts
+            accounted_high_impact_urls.add(story.source_url)
             logger.info(
                 "📝 [DRY RUN] Provisional review candidate [%.1f]: %s | %s",
                 escore.total, story.title[:60], story.verification_reason,
@@ -378,6 +428,8 @@ def fetch_and_build(
                 story.rejection_reason = None
                 save_draft(story)
                 review_drafts += 1
+                metrics["review_drafts"] = review_drafts
+                accounted_high_impact_urls.add(story.source_url)
                 logger.info(
                     "📝 Provisional story saved for review [editorial %.1f | verification %.1f]: %s",
                     escore.total,
@@ -458,6 +510,7 @@ def fetch_and_build(
             save_draft(story)
 
         ready_posts.append((escore, story, image_path))
+        accounted_high_impact_urls.add(story.source_url)
         logger.info("✅ Ready: [%.1f — %s] %s", escore.total, escore.tier.value, story.title[:60])
 
     if not ready_posts:
@@ -465,9 +518,10 @@ def fetch_and_build(
             logger.info("No auto-publishable stories; %d provisional draft(s) saved for review.", review_drafts)
         else:
             logger.warning("No stories passed all build stages. Nothing to queue.")
-        return 0
+        return finish("completed", 0)
 
     logger.info("%d/%d stories fully built and ready.", len(ready_posts), len(selected_scored))
+    metrics["ready"] = len(ready_posts)
 
     # ==========================================================================
     # STAGE 7 — ADD TO POSTING QUEUE
@@ -492,7 +546,7 @@ def fetch_and_build(
             action = "PUBLISH IMMEDIATELY" if (escore.total >= 80 or escore.impact_score >= 10) else "NEXT SCHEDULE"
             logger.info("%s [DRY RUN] %d. [%s | %.1f] %s [%s]",
                 icon, i, action, escore.total, story.title[:60], story.source_name)
-        return 0
+        return finish("dry_run", 0)
 
     direct_published = 0
     direct_failed = 0
@@ -542,11 +596,14 @@ def fetch_and_build(
         "Fetch & Build done. %d published immediately; %d scheduled; %d immediate retries; %d provisional drafts.",
         direct_published, added, direct_failed, review_drafts,
     )
+    metrics["queued"] = added + direct_failed
+    metrics["published"] = direct_published
+    metrics["review_drafts"] = review_drafts
     logger.info("Queue: %s", queue.summary())
 
     logger.info("Run  python agent.py --publish  to fire them.")
 
-    return 0
+    return finish("completed", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +620,20 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     validate_token_or_exit(exit_on_failure=True)
 
     queue = PostingQueue()
+    metrics = {
+        "queued": 0,
+        "expired": 0,
+        "published": 0,
+        "failed": 0,
+        "review_required": 0,
+        "deferred": 0,
+    }
+
+    def finish(status: str, result: int) -> int:
+        accounted = metrics["published"] + metrics["failed"] + metrics["review_required"]
+        metrics["deferred"] = max(metrics["deferred"], metrics["queued"] - accounted)
+        _write_run_summary("publish", status, metrics)
+        return result
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("  Global Pulse News — Publish from Queue")
@@ -570,13 +641,15 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
     # Expire stale entries first
     expired = queue.expire_stale()
+    metrics["expired"] = expired
     if expired:
         logger.info("⬇️  %d queue entries expired or downgraded (TTL).", expired)
 
     queued = [e for e in queue._entries if e.status == "QUEUED"]
+    metrics["queued"] = len(queued)
     if not queued:
         logger.warning("Queue is empty. Run  python agent.py --fetch --image  first.")
-        return 0
+        return finish("empty", 0)
 
     logger.info("Queue: %s", queue.summary())
 
@@ -584,7 +657,8 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     has_breaking = any(e.route == Route.PUBLISH_NOW.value for e in queued)
     if not queue.can_publish_today() and not has_breaking:
         logger.warning("Hard safety ceiling (%d) reached. Nothing published.", HARD_DAILY_CEILING)
-        return 0
+        metrics["deferred"] = len(queued)
+        return finish("deferred", 0)
 
     from facebook.publisher import (
         FacebookPublishError,
@@ -620,6 +694,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             )
             logger.warning("📝 Review required — not publishing: %s | %s", entry.title[:60], reason)
             queue.mark_review_required(entry, reason)
+            metrics["review_required"] += 1
             continue
 
         if force_now:
@@ -636,6 +711,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
         if not ok:
             logger.info("⏸  [%s] %s | %s", route_icon, entry.title[:50], reason)
+            metrics["deferred"] += 1
             continue
 
         logger.info("▶  [%s | %.1f] %s", route_icon, entry.score, entry.title[:60])
@@ -664,6 +740,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             reason = "A valid image card is required before publishing."
             logger.warning("📝 Review required — %s: %s", reason, entry.title[:60])
             queue.mark_review_required(entry, reason)
+            metrics["review_required"] += 1
             continue
 
         if not story.post_content:
@@ -703,7 +780,9 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.error("\n%s", exc)
             logger.error("❌ Fatal error — stopping. Refresh your token.\n"
                          "   Published %d post(s) before error.", published_count)
-            return 1
+            metrics["published"] = published_count
+            metrics["failed"] = failed_count + 1
+            return finish("failed", 1)
 
         except FacebookPublishError as exc:
             logger.error("Facebook publish failed: %s", exc)
@@ -713,7 +792,9 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("Done. %d published. %d failed. Queue: %s",
                 published_count, failed_count, queue.summary())
-    return 0 if failed_count == 0 else 1
+    metrics["published"] = published_count
+    metrics["failed"] = failed_count
+    return finish("completed" if failed_count == 0 else "partial_failure", 0 if failed_count == 0 else 1)
 
 
 # ---------------------------------------------------------------------------
@@ -764,6 +845,7 @@ def main(
         logger.info("Queue after TTL checks: %s", queue.summary())
         if not queued:
             logger.info("Queue is empty — nothing to publish.")
+            _write_run_summary("publish", "dry_run", {"queued": 0, "publishable": 0, "deferred": 0}, persist=False)
         else:
             publishable = []
             skipped = []
@@ -801,6 +883,12 @@ def main(
                     i, entry.score, entry.route, entry.title[:70], entry.source_name, reason,
                 )
             logger.info("Would leave %d queued due to timing/editorial gates.", len(skipped))
+            _write_run_summary(
+                "publish",
+                "dry_run",
+                {"queued": len(queued), "publishable": len(publishable), "deferred": len(skipped)},
+                persist=False,
+            )
         return 0
 
     # --fetch (with or without --publish) → run the full pipeline
