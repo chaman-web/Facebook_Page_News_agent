@@ -7,16 +7,24 @@ Sources (used in parallel, not fallback-only):
 
 Source health tracking:
   - A single timeout or HTTP error does not remove a source
-  - Three consecutive failures trigger a one-hour cool-off
-  - A successful response clears the failure streak
+  - Temporary cooldowns increase gradually after repeated failures
+  - Important sources receive extra attempts and frequent recovery probes
+  - Recent successful feed data covers short endpoint outages
+  - A successful response restores the endpoint immediately
 
 Always fetches a large pool then returns freshest `limit` stories.
 """
 
 from __future__ import annotations
 
+import copy
+import hashlib
+import json
 import logging
-from datetime import datetime, timezone
+import random
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import feedparser
 import requests
@@ -29,6 +37,9 @@ from news.regional_sources import REGIONAL_FEEDS, discovery_priority, is_region_
 logger = logging.getLogger(__name__)
 
 _FETCH_POOL = 30  # stories to fetch per individual source
+_RSS_MAX_ATTEMPTS = 2
+_FEED_CACHE_MAX_AGE = timedelta(hours=6)
+_FEED_CACHE_DIR = config.PROJECT_ROOT / ".feed_cache"
 
 # ---------------------------------------------------------------------------
 # Category definitions — 6+ RSS feeds per category for rotation
@@ -294,12 +305,13 @@ def fetch_news(
     limit: int = 5,
     category: str = "breaking",
     include_regional: bool = True,
+    _feed_cache: dict[str, list[Story]] | None = None,
 ) -> list[Story]:
     """
     Fetch `limit` fresh stories for the given category.
     - Pulls from NewsAPI + all healthy RSS feeds simultaneously
-    - Skips banned sources automatically
-    - Bans sources that rate-limit or produce mostly duplicates
+    - Temporarily cools repeatedly failing endpoints
+    - Reuses recent cached results while an endpoint recovers
     - Returns freshest `limit` stories
     """
     cat = CATEGORIES.get(category, CATEGORIES["breaking"])
@@ -308,6 +320,7 @@ def fetch_news(
     pool: list[Story] = []
     seen_urls: set[str] = set()
     regional_candidates: list[Story] = []
+    feed_cache = _feed_cache if _feed_cache is not None else {}
 
     def _add(stories: list[Story]) -> int:
         added = 0
@@ -330,21 +343,21 @@ def fetch_news(
         else:
             logger.warning("NewsAPI failed: %s", exc)
 
-    # 2. RSS feeds — skip banned, ban failing ones
+    # 2. RSS feeds — isolate cooling to each endpoint and use recent cache
     rss_total = 0
     for feed_url in cat.get("rss_feeds", []):
+        if feed_url in feed_cache:
+            rss_stories = copy.deepcopy(feed_cache[feed_url])
+            rss_total += _add(rss_stories)
+            continue
         if is_banned(feed_url):
             continue
-        try:
-            rss_stories = _parse_rss_feed(feed_url, limit=10)
-            record_success(feed_url)
-            if not rss_stories:
-                continue
-            before = len(pool)
-            added  = _add(rss_stories)
-            rss_total += added
-        except Exception as exc:
-            record_failure(feed_url, f"Fetch error: {type(exc).__name__}: {str(exc)[:120]}")
+        rss_stories = _fetch_feed_resilient(feed_url, limit=10, context="Fetch")
+        feed_cache[feed_url] = copy.deepcopy(rss_stories)
+        if not rss_stories:
+            continue
+        added = _add(rss_stories)
+        rss_total += added
 
     if rss_total:
         logger.info("RSS feeds added %d new stories for '%s'.", rss_total, cat["label"])
@@ -353,7 +366,8 @@ def fetch_news(
     # all-category path performs this sweep once after its category passes.
     if include_regional and category in {"breaking", "world"}:
         regional_candidates = fetch_regional_news(
-            limit_per_region=min(max(2, limit // 10), 5)
+            limit_per_region=min(max(2, limit // 10), 5),
+            feed_cache=feed_cache,
         )
         _add(regional_candidates)
 
@@ -383,12 +397,14 @@ def fetch_news(
 def fetch_all_categories(limit_per_category: int = 2) -> list[Story]:
     """Fetch stories from all categories and return combined list."""
     all_stories: list[Story] = []
+    feed_cache: dict[str, list[Story]] = {}
     for category in CATEGORIES:
         try:
             stories = fetch_news(
                 limit=limit_per_category,
                 category=category,
                 include_regional=False,
+                _feed_cache=feed_cache,
             )
             all_stories.extend(stories)
         except NewsSourceError as exc:
@@ -397,45 +413,41 @@ def fetch_all_categories(limit_per_category: int = 2) -> list[Story]:
     # a globally sorted pool dominated by a handful of countries.
     all_stories.extend(
         fetch_regional_news(
-            limit_per_region=min(max(3, limit_per_category // 5), 5)
+            limit_per_region=min(max(3, limit_per_category // 5), 5),
+            feed_cache=feed_cache,
         )
     )
     return all_stories
 
 
-def fetch_regional_news(limit_per_region: int = 3) -> list[Story]:
+def fetch_regional_news(
+    limit_per_region: int = 3,
+    feed_cache: dict[str, list[Story]] | None = None,
+) -> list[Story]:
     """Fetch a minimum candidate quota from every configured world region."""
     selected: list[Story] = []
     seen_urls: set[str] = set()
     coverage: dict[str, int] = {}
-    feed_cache: dict[str, list[Story]] = {}
+    run_cache = feed_cache if feed_cache is not None else {}
 
     for region, feeds in REGIONAL_FEEDS.items():
         candidates: list[Story] = []
         for feed_url in feeds:
-            if is_banned(feed_url):
-                continue
-            try:
-                if feed_url not in feed_cache:
-                    feed_cache[feed_url] = _parse_rss_feed(
-                        feed_url, limit=max(30, limit_per_region * 5)
-                    )
-                    record_success(feed_url)
-                stories = feed_cache[feed_url]
-                for story in stories:
-                    if story.source_url not in seen_urls and is_region_relevant(story, region):
-                        story.region = region
-                        story.category = "world"
-                        candidates.append(story)
-                        seen_urls.add(story.source_url)
-            except Exception as exc:
-                # Cache this run's failure so a feed shared by two regions is
-                # attempted and counted only once per job.
-                feed_cache[feed_url] = []
-                record_failure(
+            if feed_url not in run_cache:
+                if is_banned(feed_url):
+                    continue
+                run_cache[feed_url] = _fetch_feed_resilient(
                     feed_url,
-                    f"Regional fetch error: {type(exc).__name__}: {str(exc)[:120]}",
+                    limit=max(30, limit_per_region * 5),
+                    context="Regional fetch",
                 )
+            stories = copy.deepcopy(run_cache[feed_url])
+            for story in stories:
+                if story.source_url not in seen_urls and is_region_relevant(story, region):
+                    story.region = region
+                    story.category = "world"
+                    candidates.append(story)
+                    seen_urls.add(story.source_url)
 
         candidates.sort(key=discovery_priority, reverse=True)
         chosen = candidates[:limit_per_region]
@@ -510,12 +522,31 @@ def _article_to_story(article: dict) -> Story | None:
 # ---------------------------------------------------------------------------
 
 def _parse_rss_feed(feed_url: str, limit: int = 10) -> list[Story]:
-    response = requests.get(
-        feed_url,
-        timeout=12,
-        headers={"User-Agent": "GlobalPulseNews/1.0 (+news-feed-reader)"},
-    )
-    response.raise_for_status()
+    response = None
+    for attempt in range(1, _RSS_MAX_ATTEMPTS + 1):
+        try:
+            response = requests.get(
+                feed_url,
+                timeout=12,
+                headers={"User-Agent": "GlobalPulseNews/1.0 (+news-feed-reader)"},
+            )
+            response.raise_for_status()
+            break
+        except requests.RequestException as exc:
+            if attempt >= _RSS_MAX_ATTEMPTS or not _is_transient_request_error(exc):
+                raise
+            delay = 0.2 * attempt + random.uniform(0.05, 0.2)
+            logger.info(
+                "Transient RSS error; retrying endpoint in %.2fs (%d/%d) — %s",
+                delay,
+                attempt + 1,
+                _RSS_MAX_ATTEMPTS,
+                feed_url,
+            )
+            time.sleep(delay)
+
+    if response is None:
+        return []
     feed = feedparser.parse(response.content)
     stories = []
     for entry in feed.entries[:limit]:
@@ -538,6 +569,93 @@ def _parse_rss_feed(feed_url: str, limit: int = 10) -> list[Story]:
             published_at=published_at, raw_summary=raw_summary,
         ))
     return stories
+
+
+def _fetch_feed_resilient(feed_url: str, limit: int, context: str) -> list[Story]:
+    """Fetch one endpoint, falling back to recent cached stories on failure."""
+    try:
+        stories = _parse_rss_feed(feed_url, limit=limit)
+        record_success(feed_url)
+        if stories:
+            _save_feed_cache(feed_url, stories)
+        return stories
+    except Exception as exc:
+        reason = f"{context} error: {type(exc).__name__}: {str(exc)[:180]}"
+        record_failure(feed_url, reason)
+        cached = _load_feed_cache(feed_url, limit)
+        if cached:
+            logger.warning(
+                "Using recent cached feed during endpoint outage — %s | %d stories",
+                feed_url,
+                len(cached),
+            )
+        return cached
+
+
+def _is_transient_request_error(exc: requests.RequestException) -> bool:
+    if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
+        return True
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    return status == 429 or bool(status and status >= 500)
+
+
+def _cache_path(feed_url: str) -> Path:
+    name = hashlib.sha256(feed_url.encode("utf-8", errors="ignore")).hexdigest()
+    return _FEED_CACHE_DIR / f"{name}.json"
+
+
+def _save_feed_cache(feed_url: str, stories: list[Story]) -> None:
+    try:
+        _FEED_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "feed_url": feed_url,
+            "saved_at": datetime.now(timezone.utc).isoformat(),
+            "stories": [
+                {
+                    "title": story.title,
+                    "source_name": story.source_name,
+                    "source_url": story.source_url,
+                    "published_at": story.published_at.isoformat(),
+                    "raw_summary": story.raw_summary,
+                }
+                for story in stories
+            ],
+        }
+        _cache_path(feed_url).write_text(
+            json.dumps(payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        logger.debug("Could not save feed cache for %s: %s", feed_url, exc)
+
+
+def _load_feed_cache(feed_url: str, limit: int) -> list[Story]:
+    path = _cache_path(feed_url)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        saved_at = datetime.fromisoformat(payload["saved_at"])
+        if saved_at.tzinfo is None:
+            saved_at = saved_at.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) - saved_at > _FEED_CACHE_MAX_AGE:
+            return []
+        stories = []
+        for item in payload.get("stories", [])[:limit]:
+            published_at = datetime.fromisoformat(item["published_at"])
+            if published_at.tzinfo is None:
+                published_at = published_at.replace(tzinfo=timezone.utc)
+            stories.append(
+                Story(
+                    title=item["title"],
+                    source_name=item["source_name"],
+                    source_url=item["source_url"],
+                    published_at=published_at,
+                    raw_summary=item.get("raw_summary", ""),
+                )
+            )
+        return stories
+    except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return []
 
 
 # ---------------------------------------------------------------------------
