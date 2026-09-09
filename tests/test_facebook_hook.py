@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from models import Story
 from pipeline.generator import _format_post
-from facebook.publisher import _format_post as format_for_facebook
+from facebook.publisher import _clean_text, _format_post as format_for_facebook
 
 
 def test_opening_matches_card_and_uses_one_leading_symbol():
@@ -63,3 +63,19 @@ def test_publisher_preserves_two_line_hook_without_breaking_override():
 
     assert result.startswith("🌍 TURKEY EARTHQUAKE KILLS 12 PEOPLE\nRescue teams")
     assert not result.startswith("BREAKING:")
+
+
+def test_publisher_removes_blank_line_and_html_artifacts():
+    text = """🚨 VERIFIED UPDATE
+Why this matters: The result changes the Senate race.
+BLANK LINE]
+<p>Officials confirmed the result.</p><br>
+News &amp; Updates <unfinished"""
+
+    result = _clean_text(text)
+
+    assert "blank line" not in result.lower()
+    assert "<" not in result
+    assert ">" not in result
+    assert "Officials confirmed the result." in result
+    assert "News & Updates unfinished" in result
