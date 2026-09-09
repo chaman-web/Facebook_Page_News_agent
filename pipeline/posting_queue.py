@@ -242,17 +242,7 @@ class PostingQueue:
         impact_score: float = 0.0,
         impact_reasons: Optional[list] = None,
     ) -> None:
-        """Route and enqueue a story. Silently ignores duplicates."""
-        # 1. Exact URL already in queue
-        for e in self._entries:
-            if e.source_url == story.source_url:
-                return
-
-        # 2. Similar topic already queued or published — block same-event duplicates
-        if self._is_duplicate_topic(story.title):
-            logger.debug("🗑️  Duplicate topic blocked from queue: %s", story.title[:60])
-            return
-
+        """Route a story, refreshing an existing queued candidate when found."""
         cat      = getattr(story, "category", "breaking")
         tier_num = effective_tier if effective_tier is not None else CATEGORY_TIERS.get(cat, 2)
         lane     = route_story(score, tier_num, impact_score)
@@ -263,6 +253,50 @@ class PostingQueue:
             if score >= SCORE_PUBLISH_NOW
             else "editorial score >= 65"
         )
+
+        # Re-scored queued stories retain their original queue time but receive
+        # the latest evidence, content, score, and route. This permits an
+        # automatic Tier 2 -> Tier 1 promotion after new corroboration.
+        existing = next(
+            (entry for entry in self._entries
+             if entry.source_url == story.source_url and entry.status in {"QUEUED", "REVIEW_REQUIRED"}),
+            None,
+        )
+        if existing is not None:
+            previous_route = existing.route
+            existing.title = story.title
+            existing.source_name = story.source_name
+            existing.category = cat
+            existing.score = score
+            existing.category_tier = tier_num
+            existing.route = lane.value
+            existing.is_breaking = lane == Route.PUBLISH_NOW
+            existing.source_published_at = story.published_at.isoformat() if story.published_at else existing.source_published_at
+            existing.image_path = str(image_path) if image_path else existing.image_path
+            existing.image_provenance = getattr(story, "image_provenance", "") or existing.image_provenance
+            existing.image_credit = getattr(story, "image_credit", "") or existing.image_credit
+            existing.image_is_synthetic = bool(getattr(story, "image_is_synthetic", existing.image_is_synthetic))
+            existing.post_content = post_content or existing.post_content
+            existing.card_headline = card_headline or existing.card_headline
+            existing.card_description = getattr(story, "card_description", None) or existing.card_description
+            existing.hashtags = hashtags or existing.hashtags
+            existing.verification_status = story.verification_status.value
+            existing.verification_score = float(story.verification_score or 0.0)
+            existing.verification_reason = story.verification_reason or ""
+            existing.impact_score = float(impact_score or 0.0)
+            existing.impact_reasons = list(impact_reasons or [])
+            existing.routing_reason = routing_reason
+            existing.status = "QUEUED" if story.verification_status == VerificationStatus.VERIFIED else "REVIEW_REQUIRED"
+            self._save()
+            self._audit(story.title, score, tier_num, lane, "REFRESHED",
+                        f"Queue evidence refreshed; route {previous_route} -> {lane.value}")
+            logger.info("Queue refreshed [%s -> %s | %.1f]: %s", previous_route, lane.value, score, story.title[:60])
+            return
+
+        # Similar topic already queued or published — block unchanged repeats.
+        if self._is_duplicate_topic(story.title):
+            logger.debug("🗑️  Duplicate topic blocked from queue: %s", story.title[:60])
+            return
 
         if lane == Route.REJECT:
             self._audit(story.title, score, tier_num, lane, "REJECT", "Score below reject floor")
@@ -457,6 +491,29 @@ class PostingQueue:
                 policy_version=getattr(story, "policy_version", ""),
             )
             self._entries.append(entry)
+        else:
+            entry.title = story.title
+            entry.source_name = story.source_name
+            entry.category = story.category
+            entry.score = score
+            entry.category_tier = effective_tier
+            entry.route = Route.PUBLISH_NOW.value
+            entry.is_breaking = True
+            entry.source_published_at = story.published_at.isoformat() if story.published_at else entry.source_published_at
+            entry.image_path = str(image_path)
+            entry.image_provenance = getattr(story, "image_provenance", "")
+            entry.image_credit = getattr(story, "image_credit", "")
+            entry.image_is_synthetic = bool(getattr(story, "image_is_synthetic", False))
+            entry.post_content = story.post_content
+            entry.card_headline = story.card_headline
+            entry.card_description = story.card_description
+            entry.hashtags = story.hashtags
+            entry.verification_status = story.verification_status.value
+            entry.verification_score = float(story.verification_score or 0.0)
+            entry.verification_reason = story.verification_reason or ""
+            entry.impact_score = float(impact_score or 0.0)
+            entry.impact_reasons = list(impact_reasons or [])
+            entry.routing_reason = "impact score >= 10" if impact_score >= 10 else "editorial score >= 80"
         self.mark_published(entry, post_id=post_id)
 
     def mark_skipped(self, entry: QueueEntry, reason: str = "") -> None:
@@ -651,6 +708,7 @@ class PostingQueue:
           2. Keyword overlap >= 3 words AND >= 45% of title keywords match
         """
         from difflib import SequenceMatcher
+        from pipeline.deduplicator import is_meaningful_update
         import json as _json
         from pathlib import Path as _Path
 
@@ -681,6 +739,8 @@ class PostingQueue:
             pass
 
         for other in compare:
+            if is_meaningful_update(title, other):
+                continue
             # Signal 1: near-identical wording
             if SequenceMatcher(None, new_norm, norm(other)).ratio() >= 0.72:
                 return True

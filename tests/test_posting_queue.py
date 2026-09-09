@@ -62,6 +62,62 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         assert entry.card_description == story.card_description
 
 
+def test_refetch_promotes_existing_tier2_entry_to_tier1(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    story = Story(
+        title="Government issues major infrastructure update",
+        source_name="Reuters",
+        source_url="https://reuters.com/developing-update",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="Officials issued a verified infrastructure update.",
+        verification_status=VerificationStatus.VERIFIED,
+        verification_score=85,
+    )
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        queue.add(story, score=72, post_content="Initial verified update")
+        queued_at = queue._entries[0].queued_at
+
+        story.verification_score = 96
+        queue.add(
+            story,
+            score=84,
+            impact_score=11,
+            impact_reasons=["critical-infrastructure"],
+            post_content="Newly corroborated major update",
+        )
+
+        assert len(queue._entries) == 1
+        entry = queue._entries[0]
+        assert entry.queued_at == queued_at
+        assert entry.route == Route.PUBLISH_NOW.value
+        assert entry.score == 84
+        assert entry.impact_score == 11
+        assert entry.post_content == "Newly corroborated major update"
+
+
+def test_meaningful_event_update_is_not_blocked_as_queue_duplicate(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        queue._entries = [QueueEntry(
+            "Earthquake death toll rises to 20 after rescue operation", "Reuters",
+            "https://reuters.com/first", "world", 76, now.isoformat(), status="PUBLISHED",
+            published_at=now.isoformat(),
+        )]
+        update = Story(
+            title="Earthquake death toll rises to 40 after rescue operation",
+            source_name="Reuters", source_url="https://reuters.com/update",
+            published_at=now, raw_summary="Officials confirmed an updated toll.",
+            verification_status=VerificationStatus.VERIFIED, verification_score=95,
+        )
+        queue.add(update, score=82, post_content="Confirmed update")
+        assert any(entry.source_url == update.source_url for entry in queue._entries)
+
+
 def test_entries_remain_queued_until_48_hour_freshness_limit(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"

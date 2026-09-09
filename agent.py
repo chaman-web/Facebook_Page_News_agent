@@ -239,6 +239,13 @@ def fetch_and_build(
         raw_stories.extend(story for story in pending if story.source_url not in raw_urls)
         logger.info("Restored %d protected high-value candidate(s).", len(pending))
 
+    # A queued URL may gain corroboration or impact on a later fetch. Let it
+    # re-enter scoring so its lane and queue position can be refreshed.
+    queued_urls = {entry.source_url for entry in queue._entries if entry.status == "QUEUED"}
+    for story in raw_stories:
+        if story.source_url in queued_urls:
+            story.priority_protected = True
+
     logger.info("Fetched %d candidate stories total.", len(raw_stories))
     metrics["fetched"] = len(raw_stories)
     set_rss_pool(raw_stories)

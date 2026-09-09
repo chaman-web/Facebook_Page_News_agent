@@ -107,6 +107,18 @@ class TestCheckDuplicate:
         with patch("config.SEEN_STORIES_PATH", str(seen_path)):
             check_duplicate(story)
 
+    def test_material_numeric_update_passes_similar_title_history(self, tmp_path):
+        seen_path = _write_seen(tmp_path, {
+            "urls": [],
+            "titles": ["Earthquake death toll rises to 20 after rescue operation"],
+        })
+        story = _story(
+            "Earthquake death toll rises to 40 after rescue operation",
+            "https://example.com/earthquake-update",
+        )
+        with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+            check_duplicate(story)
+
 
 class TestMarkSeen:
 

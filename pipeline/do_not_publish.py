@@ -326,6 +326,9 @@ def _check_similar_title(story: Story) -> DNPVerdict:
     for recent in _RECENT_PUBLISHED_TITLES:
         ratio = SequenceMatcher(None, norm, recent).ratio()
         if ratio >= _SIMILAR_TITLE_THRESHOLD:
+            from pipeline.deduplicator import is_meaningful_update
+            if is_meaningful_update(story.title, recent):
+                continue
             return DNPVerdict(
                 DNPDecision.HOLD, "SIMILAR_TITLE",
                 f"Title is {ratio:.0%} similar to recently published story.",

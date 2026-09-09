@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -33,6 +34,24 @@ MAX_ATTEMPTS = 3
 
 # Attempt-tracked entries older than this are pruned (published entries kept forever)
 TTL_DAYS = 7
+
+_DEVELOPMENT_SIGNALS = re.compile(
+    r"\b(?:confirmed|announced|approved|rejected|resigned|arrested|charged|"
+    r"convicted|sentenced|killed|died|won|lost|launched|recovered|rescued|"
+    r"ceasefire|deal reached|rises? to|falls? to|death toll|results?)\b",
+    re.IGNORECASE,
+)
+
+
+def is_meaningful_update(new_title: str, previous_title: str) -> bool:
+    """Identify a concrete new development in an otherwise similar event."""
+    new_norm = _normalise(new_title)
+    old_norm = _normalise(previous_title)
+    new_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", new_norm))
+    old_numbers = set(re.findall(r"\b\d+(?:\.\d+)?\b", old_norm))
+    if new_numbers and new_numbers != old_numbers:
+        return True
+    return bool(_DEVELOPMENT_SIGNALS.search(new_title) and not _DEVELOPMENT_SIGNALS.search(previous_title))
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +106,9 @@ def _check_duplicate_in_state(story: Story, seen: dict, title_index: dict | None
     for seen_title, seen_norm in _candidate_titles(norm, title_index, "permanent"):
         ratio = SequenceMatcher(None, norm, seen_norm).ratio()
         if ratio >= config.DUPLICATE_TITLE_THRESHOLD:
+            if is_meaningful_update(story.title, seen_title):
+                logger.info("Meaningful update allowed through duplicate history: %s", story.title[:70])
+                continue
             raise DuplicateStory(
                 f"Similar title ({ratio:.0%} match): '{story.title}' ≈ '{seen_title}'"
             )
