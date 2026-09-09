@@ -19,6 +19,16 @@ from models import GenerationError, Story, VerificationStatus
 
 logger = logging.getLogger(__name__)
 
+# A scheduled fetch run uses one Python process. After an infrastructure-level
+# LLM failure, avoid repeating the same expensive call for every selected story.
+_GENERATION_BACKEND_UNAVAILABLE: str | None = None
+
+
+def _backend_error_summary(exc: Exception) -> str:
+    """Keep infrastructure failures useful without repeating large HTTP bodies."""
+    first_line = str(exc).splitlines()[0] if str(exc) else "unknown error"
+    return f"{type(exc).__name__}: {first_line[:180]}"
+
 
 # ---------------------------------------------------------------------------
 # Backend selection
@@ -53,6 +63,8 @@ def generate_post(story: Story) -> Story:
     - Only retry if Ollama returned nothing at all
     - Hashtags always generated deterministically
     """
+    global _GENERATION_BACKEND_UNAVAILABLE
+
     from openai import OpenAIError
     from pipeline.card_headline import select_card_headline
     from pipeline.card_description import select_card_description
@@ -70,6 +82,13 @@ def generate_post(story: Story) -> Story:
 
     # Step 1: Enrich thin story context before sending to Ollama
     story = _enrich_story_context(story)
+
+    if _GENERATION_BACKEND_UNAVAILABLE:
+        logger.warning(
+            "LLM backend remains unavailable for this run (%s) — using deterministic grounded caption.",
+            _GENERATION_BACKEND_UNAVAILABLE,
+        )
+        return _apply_grounded_fallback(story)
 
     summary_len = len(story.raw_summary or "")
     # Absolute minimum we'll accept — purely empty responses get retried
@@ -100,12 +119,21 @@ def generate_post(story: Story) -> Story:
                 temperature=0.35,
             )
         except OpenAIError as exc:
-            raise GenerationError(f"LLM call failed ({config.LLM_BACKEND}): {exc}") from exc
+            _GENERATION_BACKEND_UNAVAILABLE = _backend_error_summary(exc)
+            logger.error(
+                "LLM call failed (%s): %s — switching this run to deterministic grounded captions.",
+                config.LLM_BACKEND,
+                _GENERATION_BACKEND_UNAVAILABLE,
+            )
+            break
         except Exception as exc:  # noqa: BLE001
-            raise GenerationError(
-                f"LLM call failed ({config.LLM_BACKEND}): {exc}\n"
-                "If using Ollama, make sure it is running: ollama serve"
-            ) from exc
+            _GENERATION_BACKEND_UNAVAILABLE = _backend_error_summary(exc)
+            logger.error(
+                "LLM call failed (%s): %s — switching this run to deterministic grounded captions.",
+                config.LLM_BACKEND,
+                _GENERATION_BACKEND_UNAVAILABLE,
+            )
+            break
 
         raw_output = response.choices[0].message.content or ""
         logger.debug("LLM raw output:\n%s", raw_output)
@@ -150,17 +178,31 @@ def generate_post(story: Story) -> Story:
         "All %d model attempts failed — using deterministic grounded caption.",
         MAX_GENERATION_RETRIES,
     )
+    return _apply_grounded_fallback(story)
+
+
+def _apply_grounded_fallback(story: Story) -> Story:
+    """Build and verify a caption without depending on the writing model."""
+    from pipeline.post_fact_checker import check_generated_facts
+
     story.card_headline = _fallback_card_headline(story)
     story.card_description = None
     story.post_content = _grounded_fallback_post(story)
     story.hashtags = _generate_hashtags(story)
     fallback_check = check_generated_facts(story, story.post_content)
     if fallback_check.passed:
+        logger.info("Deterministic grounded caption created for: %s", story.title)
         return story
 
     raise GenerationError(
         "Deterministic fallback failed fact grounding: " + "; ".join(fallback_check.issues[:4])
     )
+
+
+def reset_generation_backend_state() -> None:
+    """Reset the LLM circuit breaker at the start of a new fetch run."""
+    global _GENERATION_BACKEND_UNAVAILABLE
+    _GENERATION_BACKEND_UNAVAILABLE = None
 
 
 # ---------------------------------------------------------------------------

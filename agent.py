@@ -78,7 +78,7 @@ from pipeline.deduplicator import filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
 from pipeline.editorial_scorer import EditorialTier, score_and_filter
 from pipeline.final_quality_check import FinalQualityError, final_quality_check
-from pipeline.generator import generate_post
+from pipeline.generator import generate_post, reset_generation_backend_state
 from pipeline.high_value_backlog import pending_stories, remember, resolve
 from pipeline.log_retention import retained_log_handler
 from pipeline.meta_policy_gate import (
@@ -176,6 +176,7 @@ def fetch_and_build(
     and adds fully-built posts to the queue.
     Nothing is published here.
     """
+    reset_generation_backend_state()
     queue = PostingQueue()
     metrics = {
         "fetched": 0,
@@ -188,6 +189,7 @@ def fetch_and_build(
         "published": 0,
         "review_drafts": 0,
         "high_impact_protected": 0,
+        "high_impact_build_failures": 0,
         "high_impact_missed": 0,
     }
     high_impact_urls: set[str] = set()
@@ -418,8 +420,15 @@ def fetch_and_build(
                 story = generate_post(story)
             except GenerationError as exc:
                 logger.error("Post generation failed for '%s': %s", story.title[:50], exc)
-                story.draft_status = DraftStatus.REJECTED
-                story.rejection_reason = str(exc)
+                is_high_impact = story.source_url in high_impact_urls
+                if is_high_impact:
+                    metrics["high_impact_build_failures"] += 1
+                    story.draft_status = DraftStatus.DRAFT
+                    story.rejection_reason = f"Build deferred: {exc}"
+                    logger.warning("High-impact story preserved in backlog for retry: %s", story.title[:80])
+                else:
+                    story.draft_status = DraftStatus.REJECTED
+                    story.rejection_reason = str(exc)
                 save_draft(story)
                 continue
 

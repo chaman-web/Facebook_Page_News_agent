@@ -21,7 +21,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import requests
-from PIL import Image, ImageDraw, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 import config
 from models import Story
@@ -351,7 +351,10 @@ def create_fallback_card(story: Story) -> Path:
     story.image_credit = "Global Pulse News"
     story.image_is_synthetic = False
     background = _fallback_background(story)
-    card = _compose(background, story, strong_gradients=False)
+    # The generated background already has the final canvas dimensions. Avoid
+    # optional NumPy-based saliency analysis so this last-resort path remains
+    # available even when native image-analysis dependencies cannot initialize.
+    card = _compose(background, story, strong_gradients=False, smart_crop=False)
     safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
     out_path = config.IMAGES_DIR / f"{safe}_fallback.jpg"
     card.save(out_path, "JPEG", quality=93, optimize=True)
@@ -882,14 +885,22 @@ def _download(url: str, timeout: int = 15) -> Optional[Image.Image]:
 
 # ── Composition ───────────────────────────────────────────────────────────────
 
-def _compose(photo: Image.Image, story: Story, strong_gradients: bool = False) -> Image.Image:
+def _compose(
+    photo: Image.Image,
+    story: Story,
+    strong_gradients: bool = False,
+    smart_crop: bool = True,
+) -> Image.Image:
     category = card_topic(story)
     if category not in CATEGORY_LABELS:
         category = "news"
     accent = BRAND_ACCENT
     label = CATEGORY_LABELS[category]
 
-    canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).copy()
+    if smart_crop:
+        canvas = _smart_crop(photo, IMAGE_WIDTH, IMAGE_HEIGHT).copy()
+    else:
+        canvas = ImageOps.fit(photo.convert("RGB"), (IMAGE_WIDTH, IMAGE_HEIGHT), method=Image.LANCZOS)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
     top_alpha = 255 if strong_gradients else 230
@@ -1133,7 +1144,11 @@ def _source_display_name(name: str, url: str) -> str:
 
 def _salient_focus(img: Image.Image) -> tuple[float, float]:
     """Estimate the important visual region using edges and colour contrast."""
-    import numpy as np
+    try:
+        import numpy as np
+    except Exception as exc:  # native/runtime import failures must not stop image creation
+        logger.warning("Image saliency unavailable; using centre crop: %s", exc)
+        return 0.5, 0.5
 
     sample = img.convert("RGB")
     sample.thumbnail((360, 360), Image.LANCZOS)

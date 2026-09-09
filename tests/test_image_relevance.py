@@ -119,7 +119,8 @@ def test_local_fallback_always_creates_an_image_card(tmp_path, monkeypatch):
         raw_summary="A verified story remains publishable when external image services fail.",
         category="world",
     )
-    path = create_fallback_card(story)
+    with patch("image.maker._smart_crop", side_effect=RuntimeError("NumPy unavailable")):
+        path = create_fallback_card(story)
     assert path.exists()
     assert Image.open(path).size == (1200, 1500)
 
