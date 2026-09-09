@@ -504,11 +504,14 @@ def fetch_and_build(
             policy_verdict = evaluate_meta_policy(story, image_path=image_path)
             apply_policy_verdict(story, policy_verdict)
             if policy_verdict.decision == PolicyDecision.BLOCK:
-                story.draft_status = DraftStatus.REJECTED
-                story.rejection_reason = policy_verdict.reason
+                story.draft_status = DraftStatus.POLICY_REVIEW
+                story.rejection_reason = None
                 save_draft(story)
-                record_policy_decision(story, policy_verdict, "BLOCKED")
-                logger.warning("⛔ Meta policy block: %s | %s", story.title[:60], policy_verdict.reason)
+                record_policy_decision(story, policy_verdict, "BLOCKED_AND_SAVED_FOR_REVIEW")
+                review_drafts += 1
+                metrics["review_drafts"] = review_drafts
+                accounted_high_impact_urls.add(story.source_url)
+                logger.warning("⛔ Meta policy block saved for review: %s | %s", story.title[:60], policy_verdict.reason)
                 continue
             if policy_verdict.decision == PolicyDecision.REVIEW:
                 story.draft_status = DraftStatus.POLICY_REVIEW
@@ -655,6 +658,7 @@ def _story_from_queue_entry(entry, *, provenance: str | None = None) -> Story:
         raw_summary=entry.post_content or "",
         post_content=entry.post_content,
         card_headline=entry.card_headline,
+        card_description=entry.card_description,
         hashtags=entry.hashtags or [],
         image_provenance=provenance or entry.image_provenance,
         image_credit=entry.image_credit,

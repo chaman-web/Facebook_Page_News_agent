@@ -34,6 +34,7 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         image_provenance="pollinations_ai",
         image_credit="Pollinations.ai",
         image_is_synthetic=True,
+        card_description="The emergency disrupted essential services across the region.",
     )
 
     with (
@@ -58,6 +59,7 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         assert entry.routing_reason == "impact score >= 10"
         assert entry.image_provenance == "pollinations_ai"
         assert entry.image_is_synthetic is True
+        assert entry.card_description == story.card_description
 
 
 def test_expire_stale_persists_all_required_downgrades(tmp_path):

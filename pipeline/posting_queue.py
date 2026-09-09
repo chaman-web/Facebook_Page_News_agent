@@ -219,6 +219,7 @@ class QueueEntry:
     image_is_synthetic: bool      = False
     post_content:   Optional[str] = None       # pre-generated Facebook post copy
     card_headline:  Optional[str] = None       # AI-generated punchy card headline
+    card_description: Optional[str] = None     # distinct supporting line rendered on the card
     hashtags:       Optional[list] = None      # pre-generated hashtags
     verification_status: str       = VerificationStatus.UNVERIFIED.value
     verification_score: float      = 0.0
@@ -317,6 +318,7 @@ class PostingQueue:
             image_is_synthetic = bool(getattr(story, "image_is_synthetic", False)),
             post_content  = post_content,
             card_headline = card_headline,
+            card_description = getattr(story, "card_description", None),
             hashtags      = hashtags,
             verification_status = story.verification_status.value,
             verification_score  = float(story.verification_score or 0.0),
@@ -564,6 +566,7 @@ class PostingQueue:
                 image_is_synthetic=bool(getattr(story, "image_is_synthetic", False)),
                 post_content=story.post_content,
                 card_headline=story.card_headline,
+                card_description=story.card_description,
                 hashtags=story.hashtags,
                 verification_status=story.verification_status.value,
                 verification_score=float(story.verification_score or 0.0),
@@ -1050,6 +1053,7 @@ class PostingQueue:
                 e.setdefault("image_is_synthetic", False)
                 e.setdefault("post_content",     None)
                 e.setdefault("card_headline",    None)
+                e.setdefault("card_description", None)
                 e.setdefault("hashtags",         None)
                 e.setdefault("verification_status", VerificationStatus.UNVERIFIED.value)
                 e.setdefault("verification_score",  0.0)

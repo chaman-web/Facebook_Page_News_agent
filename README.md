@@ -69,6 +69,7 @@ drafts/
 |---|---|
 | `READY_FOR_REVIEW` | Verified by 2+ sources. Ready for a human to approve and publish. |
 | `DRAFT` | Only 1 source found. Review carefully before publishing. |
+| `POLICY_REVIEW` | Preserved story that cannot be published automatically until reviewed. |
 | `REJECTED` | Failed quality or safety checks. Reason is recorded in the file. |
 
 ### Verification and scoring
@@ -82,6 +83,16 @@ Verification and editorial importance are separate decisions:
 - Selected stories receive a deeper check using public article text when accessible.
 - A powerful single-source story keeps its full editorial score and becomes a `DRAFT`.
   It cannot enter the automatic Facebook publishing path.
+
+### Facebook policy gate
+
+- Runs after generation, again before queued publishing, and inside the Facebook publisher.
+- Checks the story, Facebook caption, card headline, and card description.
+- Direct prohibited solicitations or instructions are blocked from automatic publishing.
+- Legitimate reporting context is retained as `POLICY_REVIEW` instead of being discarded.
+- Only images with recorded provenance are accepted. Missing or legacy images are replaced
+  with a locally generated branded fallback, so posts are never published as text only.
+- Sensitive real-world stories do not use synthetic event imagery.
 
 ### JSON structure
 
@@ -145,6 +156,6 @@ facebook-news-agent/
 
 ## Current safety boundary
 
-Source agreement is deterministic and auditable, but it is not a professional fact-checking
-service. Image relevance remains a separate improvement area: current stock or generated
-images are checked for visual quality, not full factual identity matching.
+Source agreement and policy checks are deterministic and auditable, but they are not a
+professional fact-checking or legal-review service. Stock images are checked for metadata
+relevance and visual quality, not full factual identity matching.
