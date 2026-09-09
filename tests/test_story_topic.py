@@ -30,5 +30,14 @@ def test_tariff_story_uses_business_label():
     assert card_topic(story) == "business"
 
 
+def test_petrol_price_story_uses_business_label():
+    story = _story(
+        "Govt hikes petrol price and high-speed diesel price",
+        "The government announced new fuel prices after reviewing energy costs.",
+        category="breaking",
+    )
+    assert card_topic(story) == "business"
+
+
 def test_existing_specific_category_is_safe_fallback():
     assert card_topic(_story("Local team announces a new captain", category="sports")) == "sports"

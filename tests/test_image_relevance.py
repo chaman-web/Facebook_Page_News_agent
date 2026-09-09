@@ -6,6 +6,7 @@ from PIL import Image
 from models import Story
 from image.maker import (
     _context_line,
+    _fallback_background,
     _fetch_article_photo,
     _image_description_matches,
     _smart_crop,
@@ -49,6 +50,60 @@ def test_local_fallback_always_creates_an_image_card(tmp_path, monkeypatch):
     path = create_fallback_card(story)
     assert path.exists()
     assert Image.open(path).size == (1200, 1500)
+
+
+def test_fallback_background_is_deterministic_but_varies_by_story():
+    published = datetime(2026, 9, 9, tzinfo=timezone.utc)
+    fuel_story = Story(
+        title="Pakistan raises petrol prices",
+        source_name="Dawn",
+        source_url="https://dawn.com/fuel",
+        published_at=published,
+        raw_summary="New petrol prices affect transport costs and the economy.",
+        category="breaking",
+    )
+    trade_story = Story(
+        title="Canada introduces new trade tariffs",
+        source_name="Reuters",
+        source_url="https://reuters.com/trade",
+        published_at=published,
+        raw_summary="The tariff decision changes trade costs for businesses.",
+        category="breaking",
+    )
+
+    fuel_first = _fallback_background(fuel_story)
+    fuel_second = _fallback_background(fuel_story)
+    trade = _fallback_background(trade_story)
+
+    assert fuel_first.tobytes() == fuel_second.tobytes()
+    assert fuel_first.tobytes() != trade.tobytes()
+
+
+def test_failed_photo_is_not_reused_for_later_empty_searches(tmp_path):
+    story = Story(
+        title="Verified story with no suitable external image",
+        source_name="BBC News",
+        source_url="https://bbc.com/no-image",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="The story is verified but its available photograph is unsuitable.",
+        category="world",
+    )
+    rejected_photo = Image.new("RGB", (1200, 1500), "#222222")
+    composed = Image.new("RGB", (1200, 1500), "#111111")
+    fallback_path = tmp_path / "fallback.jpg"
+
+    with (
+        patch("image.maker._fetch_photo", return_value=rejected_photo),
+        patch("image.maker._fetch_photo_by_keyword", return_value=None),
+        patch("image.maker._compose", return_value=composed) as compose,
+        patch("image.maker._mobile_visibility_check", return_value={"photo_blur": "too soft"}),
+        patch("image.maker.create_fallback_card", return_value=fallback_path),
+    ):
+        from image.maker import create_news_image
+        result = create_news_image(story)
+
+    assert result == fallback_path
+    assert compose.call_count == 1
 
 
 def test_smart_crop_keeps_off_center_subject_visible():

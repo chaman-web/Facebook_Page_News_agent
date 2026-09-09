@@ -5,12 +5,14 @@ Design: Full-bleed photo with gradient overlays, editorial style.
 Canvas: 1200 × 1500 px (4:5 mobile-first)
 
 Fallback chain:
-  Article image → relevant Pexels image → category fallback → draft hold
+  Article image → relevant Pexels image → story-aware branded fallback
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
+import random
 import re
 from datetime import datetime, timezone
 from io import BytesIO
@@ -275,9 +277,10 @@ def create_news_image(story: Story) -> Optional[Path]:
 
     Redesign strategy on failure:
       Attempt 1 — normal composition with fetched photo.
-      Attempt 2 — same photo, stronger gradient overlays (boost contrast).
-      Attempt 3 — new photo fetch (different keyword), standard overlays.
-      If all attempts fail → return None so the story remains a draft.
+      Attempt 2 — relevant stock or generated photo.
+      Attempt 3 — broader story keywords.
+      Attempt 4 — category keywords.
+      If all attempts fail → create a unique story-aware branded card.
     """
     IMAGES_DIR = config.IMAGES_DIR
     IMAGES_DIR.mkdir(parents=True, exist_ok=True)
@@ -306,16 +309,11 @@ def create_news_image(story: Story) -> Optional[Path]:
     ])
 
     fail_summary = ""
-    last_photo   = None
-
     for attempt, fetch_fn in enumerate(search_strategies):
         current_photo = fetch_fn()
         if current_photo is None:
             logger.warning("Image fetch strategy %d returned nothing — skipping.", attempt + 1)
-            if last_photo is None:
-                continue
-            current_photo = last_photo  # reuse last known photo as a last resort
-        last_photo = current_photo
+            continue
 
         image  = _compose(current_photo, story, strong_gradients=False)
         issues = _mobile_visibility_check(image, story, raw_photo=current_photo)
@@ -342,42 +340,136 @@ def create_news_image(story: Story) -> Optional[Path]:
 
 
 def create_fallback_card(story: Story) -> Path:
-    """Create a guaranteed local card when no external image is available."""
+    """Create a guaranteed, story-aware card when no external image is available."""
     config.IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    category = (getattr(story, "category", "") or "news").lower()
-    color = CATEGORY_DOT_COLORS.get(category, CATEGORY_DOT_COLORS["news"])
+    background = _fallback_background(story)
+    card = _compose(background, story, strong_gradients=False)
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
+    out_path = config.IMAGES_DIR / f"{safe}_fallback.jpg"
+    card.save(out_path, "JPEG", quality=93, optimize=True)
+    logger.info("✅ Story-aware fallback image saved: %s", out_path)
+    return out_path
+
+
+def _fallback_background(story: Story) -> Image.Image:
+    """Return a deterministic abstract background unique to the story and topic."""
+    topic = card_topic(story)
+    color = CATEGORY_DOT_COLORS.get(topic, CATEGORY_DOT_COLORS["news"])
+    identity = f"{story.source_url}|{story.title}".encode("utf-8", errors="ignore")
+    seed = int.from_bytes(hashlib.sha256(identity).digest()[:8], "big")
+    rng = random.Random(seed)
+    variant = seed % 6
+    variant_colors = (GOLD, (0, 170, 255), RED, (0, 205, 155), (185, 80, 220), (255, 125, 45))
+    variant_color = variant_colors[variant]
+    visual_color = tuple(
+        int(channel * 0.58 + variant_channel * 0.42)
+        for channel, variant_channel in zip(color, variant_color)
+    )
 
     background = Image.new("RGB", (IMAGE_WIDTH, IMAGE_HEIGHT), NAVY)
     draw = ImageDraw.Draw(background, "RGBA")
     for y in range(IMAGE_HEIGHT):
         t = y / max(IMAGE_HEIGHT - 1, 1)
+        wave = 0.5 + 0.5 * ((y + (seed % 420)) % 420) / 420
+        strength = 0.08 + (0.18 * t) + (0.04 * wave)
         draw.line(
             (0, y, IMAGE_WIDTH, y),
             fill=(
-                int(NAVY[0] + color[0] * t * 0.22),
-                int(NAVY[1] + color[1] * t * 0.22),
-                int(NAVY[2] + color[2] * t * 0.22),
+                min(255, int(NAVY[0] + visual_color[0] * strength)),
+                min(255, int(NAVY[1] + visual_color[1] * strength)),
+                min(255, int(NAVY[2] + visual_color[2] * strength)),
                 255,
             ),
         )
-    # Abstract newsroom/world pattern adds depth without implying a false photo.
-    for radius, alpha in ((430, 32), (330, 42), (230, 52)):
-        box = (
-            IMAGE_WIDTH - radius - 120,
-            IMAGE_HEIGHT // 2 - radius,
-            IMAGE_WIDTH + radius - 120,
-            IMAGE_HEIGHT // 2 + radius,
-        )
-        draw.ellipse(box, outline=(*color, alpha), width=5)
-    for offset in range(-500, 700, 120):
-        draw.line((offset, IMAGE_HEIGHT, offset + 900, 0), fill=(255, 255, 255, 16), width=3)
 
-    card = _compose(background, story, strong_gradients=False)
-    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in story.title[:45])
-    out_path = config.IMAGES_DIR / f"{safe}_fallback.jpg"
-    card.save(out_path, "JPEG", quality=93, optimize=True)
-    logger.info("✅ Branded fallback image saved: %s", out_path)
-    return out_path
+    # Story-seeded glows and guide lines ensure consecutive fallbacks never
+    # look like copies, even when they share a category.
+    for _ in range(4):
+        cx = rng.randint(180, IMAGE_WIDTH + 120)
+        cy = rng.randint(430, 1120)
+        radius = rng.randint(150, 390)
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=(*visual_color, rng.randint(10, 24)),
+            outline=(*WHITE, rng.randint(12, 28)),
+            width=rng.randint(2, 5),
+        )
+    slope = -1 if variant % 2 else 1
+    for offset in range(-650, 950, 135 + (variant * 7)):
+        x2 = offset + slope * (760 + variant * 35)
+        draw.line((offset, IMAGE_HEIGHT, x2, 260), fill=(*WHITE, 13), width=3)
+
+    _draw_fallback_motif(draw, topic, visual_color, rng, variant)
+    return background
+
+
+def _draw_fallback_motif(
+    draw: ImageDraw.ImageDraw,
+    topic: str,
+    color: tuple[int, int, int],
+    rng: random.Random,
+    variant: int,
+) -> None:
+    """Draw a factual, non-photographic topic cue in the card's open center."""
+    shift = (variant - 2) * 24
+    cx, cy = 780 + shift, 760 + rng.randint(-45, 45)
+    bright = (*color, 150)
+    soft = (*color, 70)
+    white = (*WHITE, 95)
+
+    if topic == "business":
+        base = cy + 250
+        heights = [180 + rng.randint(0, 80), 290 + rng.randint(0, 80), 410 + rng.randint(0, 80)]
+        for index, height in enumerate(heights):
+            x = cx - 290 + index * 190
+            draw.rounded_rectangle((x, base - height, x + 105, base), radius=18, fill=soft, outline=bright, width=5)
+        points = [(cx - 330, base - 90), (cx - 90, base - 270), (cx + 120, base - 220), (cx + 330, base - 470)]
+        draw.line(points, fill=white, width=12, joint="curve")
+        draw.polygon(((cx + 330, base - 470), (cx + 275, base - 448), (cx + 315, base - 405)), fill=white)
+    elif topic == "politics":
+        draw.polygon(((cx - 360, cy - 110), (cx, cy - 360), (cx + 360, cy - 110)), fill=soft, outline=bright)
+        draw.rectangle((cx - 375, cy - 105, cx + 375, cy - 55), fill=bright)
+        for x in range(cx - 300, cx + 301, 150):
+            draw.rounded_rectangle((x, cy - 40, x + 72, cy + 330), radius=12, fill=soft, outline=white, width=4)
+        draw.rectangle((cx - 400, cy + 335, cx + 400, cy + 390), fill=bright)
+    elif topic in {"technology", "science", "wellness"}:
+        nodes = [(cx + rng.randint(-340, 340), cy + rng.randint(-300, 300)) for _ in range(9)]
+        for left, right in zip(nodes, nodes[1:]):
+            draw.line((left, right), fill=soft, width=6)
+        for x, y in nodes:
+            radius = rng.randint(18, 34)
+            draw.ellipse((x-radius, y-radius, x+radius, y+radius), fill=bright, outline=white, width=4)
+        if topic == "wellness":
+            draw.line((cx-390, cy+60, cx-170, cy+60, cx-80, cy-110, cx+30, cy+190, cx+135, cy, cx+390, cy), fill=white, width=12)
+    elif topic in {"climate", "world"}:
+        radius = 330
+        draw.ellipse((cx-radius, cy-radius, cx+radius, cy+radius), outline=bright, width=10)
+        for inset in (95, 205):
+            draw.ellipse((cx-radius+inset, cy-radius, cx+radius-inset, cy+radius), outline=soft, width=5)
+        for dy in (-155, 0, 155):
+            draw.arc((cx-radius, cy-radius+dy, cx+radius, cy+radius-dy), 0, 180, fill=white, width=5)
+    elif topic in {"crime", "war"}:
+        shield = ((cx, cy-360), (cx+300, cy-220), (cx+245, cy+145), (cx, cy+390), (cx-245, cy+145), (cx-300, cy-220))
+        draw.polygon(shield, fill=soft, outline=bright)
+        draw.line((cx, cy-260, cx, cy+255), fill=white, width=10)
+        draw.line((cx-185, cy-20, cx+185, cy-20), fill=white, width=10)
+    elif topic == "sports":
+        for inset in (0, 70, 140):
+            draw.arc((cx-390+inset, cy-260+inset, cx+390-inset, cy+420-inset), 190, 350, fill=bright, width=14)
+        draw.ellipse((cx-105, cy-105, cx+105, cy+105), outline=white, width=10)
+    elif topic == "entertainment":
+        draw.polygon(((cx-410, cy+360), (cx-220, cy-360), (cx-30, cy+360)), fill=soft)
+        draw.polygon(((cx+20, cy+360), (cx+220, cy-360), (cx+420, cy+360)), fill=soft)
+        draw.ellipse((cx-90, cy-90, cx+90, cy+90), fill=bright, outline=white, width=6)
+    elif topic == "jobs":
+        draw.rounded_rectangle((cx-360, cy-180, cx+360, cy+300), radius=42, fill=soft, outline=bright, width=8)
+        draw.arc((cx-150, cy-350, cx+150, cy-70), 180, 360, fill=white, width=12)
+        draw.line((cx-360, cy+20, cx+360, cy+20), fill=white, width=8)
+    else:
+        # Breaking/general news: a broadcast pulse with story-seeded geometry.
+        for radius in (105, 205, 315):
+            draw.arc((cx-radius, cy-radius, cx+radius, cy+radius), 205+variant*5, 515-variant*4, fill=bright, width=12)
+        draw.ellipse((cx-42, cy-42, cx+42, cy+42), fill=white)
 
 
 def _mobile_visibility_check(image: Image.Image, story: Story,

@@ -22,7 +22,8 @@ _TOPIC_TERMS = {
     ),
     "business": (
         "tariff", "trade ban", "economy", "economic", "market", "inflation",
-        "interest rate", "company", "business", "stock", "oil price", "layoff",
+        "interest rate", "company", "business", "stock", "oil price", "fuel price",
+        "energy price", "petrol", "diesel", "layoff",
     ),
     "politics": (
         "election", "government", "parliament", "minister", "president",
