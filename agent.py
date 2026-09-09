@@ -693,10 +693,12 @@ def _story_from_queue_entry(entry, *, provenance: str | None = None) -> Story:
 
 
 def _replace_queue_image_with_fallback(queue, entry, story: Story) -> Path:
-    """Restore a mandatory, policy-safe image without changing story routing."""
-    from image.maker import create_fallback_card
+    """Restore a queue image through the full image priority chain."""
+    from image.maker import create_fallback_card, create_news_image
 
-    image_path = create_fallback_card(story)
+    image_path = create_news_image(story)
+    if image_path is None:
+        image_path = create_fallback_card(story)
     entry.image_path = str(image_path)
     entry.image_provenance = story.image_provenance
     entry.image_credit = story.image_credit
@@ -834,7 +836,11 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         if not image_path or not image_path.exists():
             try:
                 image_path = _replace_queue_image_with_fallback(queue, entry, story)
-                logger.info("Missing image restored with branded fallback: %s", entry.title[:60])
+                logger.info(
+                    "Missing image restored using %s: %s",
+                    entry.image_provenance,
+                    entry.title[:60],
+                )
             except Exception as exc:
                 reason = f"Mandatory fallback image creation failed: {exc}"
                 logger.warning("📝 Review required — %s: %s", reason, entry.title[:60])
@@ -844,11 +850,16 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
         # Pre-provenance queue entries remain publishable without trusting an
         # image whose reuse rights cannot be established. Replace that legacy
-        # card with the guaranteed local branded fallback.
+        # card with a newly sourced compliant image. The branded design remains
+        # the final option inside the normal image priority chain.
         if story.image_provenance == "legacy_unknown":
             try:
                 image_path = _replace_queue_image_with_fallback(queue, entry, story)
-                logger.info("Legacy image replaced with compliant branded fallback: %s", entry.title[:60])
+                logger.info(
+                    "Legacy image replaced using %s: %s",
+                    entry.image_provenance,
+                    entry.title[:60],
+                )
             except Exception as exc:
                 reason = f"Legacy image provenance is unknown and fallback creation failed: {exc}"
                 logger.warning("🛡️ %s", reason)

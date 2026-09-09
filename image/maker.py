@@ -393,6 +393,19 @@ def _fallback_background(story: Story) -> Image.Image:
             ),
         )
 
+    # Add a soft editorial spotlight without external/native dependencies.
+    glow = Image.new("RGBA", background.size, (0, 0, 0, 0))
+    glow_draw = ImageDraw.Draw(glow, "RGBA")
+    glow_x = rng.randint(690, 1010)
+    glow_y = rng.randint(570, 930)
+    glow_draw.ellipse(
+        (glow_x - 390, glow_y - 390, glow_x + 390, glow_y + 390),
+        fill=(*visual_color, 105),
+    )
+    glow = glow.filter(ImageFilter.GaussianBlur(145))
+    background = Image.alpha_composite(background.convert("RGBA"), glow).convert("RGB")
+    draw = ImageDraw.Draw(background, "RGBA")
+
     # Story-seeded glows and guide lines ensure consecutive fallbacks never
     # look like copies, even when they share a category.
     for _ in range(4):
@@ -409,6 +422,25 @@ def _fallback_background(story: Story) -> Image.Image:
     for offset in range(-650, 950, 135 + (variant * 7)):
         x2 = offset + slope * (760 + variant * 35)
         draw.line((offset, IMAGE_HEIGHT, x2, 260), fill=(*WHITE, 13), width=3)
+
+    # A restrained dot field and frame give fallback cards a stronger visual
+    # hierarchy while preserving space for the headline and context line.
+    dot_start_x = 745 + (variant * 12)
+    dot_start_y = 570 + (variant * 9)
+    for row in range(7):
+        for col in range(7):
+            radius = 3 if (row + col + variant) % 3 else 5
+            x = dot_start_x + col * 54
+            y = dot_start_y + row * 54
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*WHITE, 55))
+    draw.rounded_rectangle(
+        (620, 470, 1135, 1080),
+        radius=42,
+        outline=(*visual_color, 90),
+        width=4,
+    )
+    draw.line((620, 470, 760, 470), fill=(*WHITE, 175), width=7)
+    draw.line((1135, 940, 1135, 1080), fill=(*WHITE, 175), width=7)
 
     _draw_fallback_motif(draw, topic, visual_color, rng, variant)
     return background
