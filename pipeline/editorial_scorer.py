@@ -27,11 +27,11 @@ EDITORIAL CLASSIFICATION (after multiplier, capped at 100):
   90–100 → PRIORITY / BREAKING
   80–89  → HIGH PRIORITY
   70–79  → PUBLISH
-  60–69  → SCHEDULE / HOLD
-  < 60   → DO NOT PUBLISH
+  65–69  → SCHEDULE / HOLD
+  < 65   → DO NOT PUBLISH
 
 QUEUE ROUTING is separate: score >=80 or impact_score >=10 publishes now;
-verified scores 60–79.9 enter the scheduled lane; scores below 60 are rejected.
+verified scores 65–79.9 enter Tier 2; scores below 65 are rejected.
 
 VERIFICATION IS A SEPARATE GATE:
   This module measures editorial importance only. A high score preserves a
@@ -61,8 +61,8 @@ class EditorialTier(str, Enum):
     PRIORITY = "PRIORITY / BREAKING"   # 90–100
     HIGH     = "HIGH PRIORITY"         # 80–89
     PUBLISH  = "PUBLISH"               # 70–79
-    HOLD     = "SCHEDULE / HOLD"       # 60–69
-    REJECT   = "DO NOT PUBLISH"        # < 60
+    HOLD     = "SCHEDULE / HOLD"       # 65–69
+    REJECT   = "DO NOT PUBLISH"        # < 65
 
 
 @dataclass
@@ -558,7 +558,7 @@ def score_and_filter(
         results = []
 
     logger.info(
-        "Editorial gate: %d strong, %d hold, %d rejected (score < 60) from %d stories.",
+        "Editorial gate: %d strong, %d hold, %d rejected (score < 65) from %d stories.",
         len(strong), len(fillers), rejected, len(stories),
     )
 
@@ -804,7 +804,7 @@ def _classify_tier(total: float) -> EditorialTier:
     if total >= 90: return EditorialTier.PRIORITY
     if total >= 80: return EditorialTier.HIGH
     if total >= 70: return EditorialTier.PUBLISH
-    if total >= 60: return EditorialTier.HOLD
+    if total >= 65: return EditorialTier.HOLD
     return EditorialTier.REJECT
 
 

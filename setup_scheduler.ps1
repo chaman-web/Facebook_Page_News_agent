@@ -39,16 +39,16 @@ Register-ScheduledTask `
 
 Write-Host "OK Job 1 registered - every 3 hours"
 
-# --- Job 2: Publish — 13:00, 18:00, 00:00 PKT (= 08:00, 13:00, 19:00 UTC) ---
+# --- Job 2: Publish — inspect the two-tier queue every 10 minutes ---
 $action2 = New-ScheduledTaskAction `
     -Execute (Join-Path $projectDir "run_job2_publish.bat") `
     -WorkingDirectory $projectDir
 
-$trigger2 = @(
-    $(New-ScheduledTaskTrigger -Daily -At "13:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "18:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "00:00")
-)
+$trigger2 = New-ScheduledTaskTrigger `
+    -Once `
+    -At (Get-Date).AddMinutes(1) `
+    -RepetitionInterval (New-TimeSpan -Minutes 10) `
+    -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $settings2 = New-ScheduledTaskSettingsSet `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
@@ -65,6 +65,6 @@ Register-ScheduledTask `
     -Force `
     -ErrorAction Stop
 
-Write-Host "OK Job 2 registered - 13:00 / 18:00 / 00:00 PKT"
+Write-Host "OK Job 2 registered - every 10 minutes"
 Write-Host ""
 Write-Host "Done. Open taskschd.msc to verify."

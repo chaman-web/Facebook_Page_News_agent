@@ -1,50 +1,13 @@
 """
 pipeline/posting_queue.py — Editorial posting queue for Global Pulse News.
 
-Publishing philosophy:
-  The queue never asks "have we posted enough today?"
-  It only asks "does this story deserve our audience's attention right now?"
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  ROUTING LANES  (assigned at queue-entry time via route_story)
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  🚨 PUBLISH_NOW   score ≥ 80 or impact score ≥ 10
-     Bypass interval, dead-hours, fatigue. Publish immediately.
-     TTL: 2 hours. After that, downgrades to NEXT_SLOT.
-     Token-bucket: minimum 10-min gap between two PUBLISH_NOW posts.
-
-  📅 SCHEDULE      score 60–79.9 when impact score < 10
-     Holds for the next scheduled window (00:00 / 13:00 / 18:00 local).
-     Only the highest-scoring SCHEDULE story publishes per window slot.
-     TTL: 12 hours.
-
-  🗑️  REJECT        score < 60
-     Dropped. Never enters the queue.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Day classification (auto-detected from queue content):
-    MAJOR BREAKING  → publish as they arrive
-    BUSY NEWS DAY   → normal interval, higher ceiling
-    NORMAL DAY      → standard operation
-    LOW NEWS DAY    → legacy HOLD entries remain supported
-
-  Hard safety ceiling: 15 posts/day (circuit breaker only).
-  No minimum. Zero posts on a dead day is valid.
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Features:
-  #1  — Scheduled window awareness   (uses PUBLISH_WINDOWS_LOCAL from config.py)
-  #2  — Per-lane TTL + auto-expiry   (PUBLISH_NOW 2h, NEXT_SLOT 6h, SCHEDULE 12h, HOLD EoD)
-  #3  — Re-routing on TTL expiry     (PUBLISH_NOW→NEXT_SLOT, NEXT_SLOT→SCHEDULE on age)
-  #4  — Audit log                    (posting_decisions.jsonl — every decision recorded)
-  #5  — PUBLISH_NOW token bucket     (min 10-min gap between consecutive breaking posts)
-  #6  — Slot reservation             (only top-scoring SCHEDULE story takes each window slot)
-  #7  — Dead hours suppression       (PUBLISH_NOW plus configured midnight window)
-  #8  — Per-tier daily slot caps     (prevents category flooding)
-  #9  — Audience fatigue             (no 3+ consecutive same-tier posts)
-  #10 — Category diversity premium   (same-category repeat needs extra score)
-  #11 — Topic diminishing returns    (same-topic repeats raise the bar)
+Two-tier behavior:
+  Tier 1: score >= 80 or impact >= 10. Unlimited per day, with a 10-minute
+          minimum gap from the previous post.
+  Tier 2: score 65-79.9. Highest score publishes first, with a 30-minute gap
+          and a limit of 12 regular posts per local day.
+  Both tiers retain fresh queued stories for up to 48 hours. Temporary
+  Facebook delivery failures remain queued for the next worker run.
 """
 
 from __future__ import annotations
@@ -83,8 +46,8 @@ WINDOW_TOLERANCE_MINUTES = 15
 
 SCORE_PUBLISH_NOW = 80.0
 SCORE_NEXT_SLOT   = 75.0  # Legacy TTL/minimum-floor support; not assigned to new entries.
-SCORE_SCHEDULE    = 60.0
-SCORE_HOLD        = 50.0  # Legacy HOLD support; new entries below 60 are rejected.
+SCORE_SCHEDULE    = 65.0
+SCORE_HOLD        = 50.0  # Legacy compatibility; new entries below 65 are rejected.
 
 TIER1_PUBLISH_NOW = 85.0   # Backwards-compatible alias; new routing uses 80.
 TIER1_NEXT_SLOT   = 60.0   # Backwards-compatible alias; new entries use SCHEDULE.
@@ -92,10 +55,13 @@ TIER1_NEXT_SLOT   = 60.0   # Backwards-compatible alias; new entries use SCHEDUL
 # Intervals
 PUBLISH_NOW_MIN_GAP = timedelta(minutes=10)   # Feature #5 — token bucket
 NEXT_SLOT_INTERVAL  = timedelta(minutes=30)
-SCHEDULE_INTERVAL   = timedelta(hours=1)
+SCHEDULE_INTERVAL   = timedelta(minutes=30)
 
-# Hard daily ceiling — circuit breaker only
-HARD_DAILY_CEILING = 15
+# Daily limit for regular Tier 2 posts
+TIER2_DAILY_LIMIT = 12
+# Compatibility alias used by the CLI and older integrations. It now applies
+# only to regular Tier 2 posts; Tier 1 breaking posts are unlimited.
+HARD_DAILY_CEILING = TIER2_DAILY_LIMIT
 
 # Dead hours — Feature #7
 DEAD_HOURS_START     = 0
@@ -119,10 +85,8 @@ TOPIC_REPEAT_MAX_PENALTY  = 30.0
 
 # Per-lane TTL — Feature #2
 LANE_TTL: dict[str, timedelta] = {
-    "PUBLISH_NOW": timedelta(hours=2),
-    "NEXT_SLOT":   timedelta(hours=6),
-    "SCHEDULE":    timedelta(hours=12),
-    "HOLD":        timedelta(hours=18),   # effectively end of day
+    route: timedelta(hours=48)
+    for route in ("PUBLISH_NOW", "NEXT_SLOT", "SCHEDULE", "HOLD")
 }
 
 # Backwards-compat aliases
@@ -170,14 +134,14 @@ def route_story(score: float, tier: int, impact_score: float = 0.0) -> Route:
 
     New-entry score thresholds:
         impact ≥ 10 or score ≥ 80  PUBLISH_NOW
-        score 60–79.9              SCHEDULE
-        < 60    REJECT
+        score 65–79.9              SCHEDULE
+        < 65    REJECT
 
     ``tier`` is retained for API compatibility. Existing NEXT_SLOT and HOLD
     entries remain supported by the queue's expiry and migration paths.
     """
-    # Simple editorial routing: high value goes now, moderate waits for the
-    # next scheduled window, low value never enters the queue.
+    # High value goes now, moderate enters the score-ordered queue, and low
+    # value never enters the queue.
     if impact_score >= 10 or score >= SCORE_PUBLISH_NOW:
         return Route.PUBLISH_NOW
     if score >= SCORE_SCHEDULE:           return Route.SCHEDULE
@@ -232,6 +196,9 @@ class QueueEntry:
     policy_reasons:     Optional[list] = None
     policy_version:     str         = ""
     facebook_post_id: Optional[str] = None
+    source_published_at: Optional[str] = None
+    publish_attempts: int = 0
+    last_publish_error: str = ""
 
     @property
     def route_enum(self) -> Route:
@@ -242,7 +209,7 @@ class QueueEntry:
 
     def age(self, now: Optional[datetime] = None) -> timedelta:
         now = now or datetime.now(timezone.utc)
-        return now - datetime.fromisoformat(self.queued_at)
+        return now - datetime.fromisoformat(self.source_published_at or self.queued_at)
 
 
 # ---------------------------------------------------------------------------
@@ -251,8 +218,8 @@ class QueueEntry:
 
 class PostingQueue:
     """
-    Editorial posting queue with 4-lane routing, TTL expiry, audit log,
-    scheduled window awareness, and token-bucket rate limiting.
+    Editorial posting queue with two-tier routing, freshness expiry, audit
+    logging, global score order, and minimum publishing intervals.
     """
 
     def __init__(self) -> None:
@@ -294,7 +261,7 @@ class PostingQueue:
             if impact_score >= 10
             else "editorial score >= 80"
             if score >= SCORE_PUBLISH_NOW
-            else "editorial score >= 60"
+            else "editorial score >= 65"
         )
 
         if lane == Route.REJECT:
@@ -309,6 +276,7 @@ class PostingQueue:
             category      = cat,
             score         = score,
             queued_at     = datetime.now(timezone.utc).isoformat(),
+            source_published_at = story.published_at.isoformat() if story.published_at else None,
             is_breaking   = lane == Route.PUBLISH_NOW,
             category_tier = tier_num,
             route         = lane.value,
@@ -353,132 +321,32 @@ class PostingQueue:
         last_published_at: Optional[datetime],
         last_breaking_at:  Optional[datetime] = None,
     ) -> tuple[bool, str]:
-        """
-        The core editorial question: does this story deserve publishing right now?
-
-        Checks (fail-fast):
-          1.  Hard ceiling
-          2.  TTL expiry / downgrade         — Feature #2, #3
-          3.  Dead hours                     — Feature #7
-          4.  Per-tier slot cap              — Feature #8
-          5.  Audience fatigue               — Feature #9
-          6.  Score floor + premiums         — Features #10, #11
-          7.  HOLD surface gate              — low-news days only
-          8.  PUBLISH_NOW token bucket       — Feature #5
-          9.  SCHEDULE window awareness      — Feature #1, #6
-          10. NEXT_SLOT interval
-          11. SCHEDULE/HOLD interval
-        """
-        now   = datetime.now(timezone.utc)
-        tier  = entry.category_tier
-        score = entry.score
-        lane  = entry.route_enum
-
-        # 1. Hard ceiling
-        if self.daily_published_count() >= HARD_DAILY_CEILING:
-            return False, f"Hard safety ceiling ({self.daily_published_count()}/{HARD_DAILY_CEILING})"
-
-        # 2. TTL expiry + re-routing (Feature #2, #3)
+        """Apply the two-tier timing, priority and daily-limit rules."""
+        now = datetime.now(timezone.utc)
+        lane = entry.route_enum
         ttl_result = self._check_ttl(entry, now)
         if ttl_result is not None:
-            return ttl_result   # (False, reason) if expired; lane was mutated in-place if downgraded
-        # Re-read lane after possible downgrade
-        lane = entry.route_enum
+            return ttl_result
 
-        # 3. Dead hours — PUBLISH_NOW passes, as does the configured midnight window
-        in_scheduled_window, _ = self._in_scheduled_window(now)
-        scheduled_window_exception = lane == Route.SCHEDULE and in_scheduled_window
-        if self.is_dead_hours() and lane != Route.PUBLISH_NOW and not scheduled_window_exception:
-            return False, (
-                f"Dead hours ({DEAD_HOURS_START:02d}:00–{DEAD_HOURS_END:02d}:00) — "
-                f"only 🚨 PUBLISH_NOW passes (need {DEAD_HOURS_MIN_SCORE:.0f}, have {score:.0f})"
-            )
-
-        # 4. Per-tier slot cap — PUBLISH_NOW bypasses cap (breaking news always goes through)
-        tier_count = self._tier_daily_count(tier)
-        if tier_count >= TIER_DAILY_SLOTS[tier] and lane != Route.PUBLISH_NOW:
-            return False, f"Tier {tier} slot cap ({tier_count}/{TIER_DAILY_SLOTS[tier]})"
-
-        # 5. Audience fatigue (Tier 1 exempt)
-        fatigued = self._fatigued_tier()
-        if tier != 1 and tier == fatigued:
-            return False, (
-                f"Audience fatigue — {MAX_CONSECUTIVE_SAME_TIER} consecutive "
-                f"Tier {tier} posts. Forcing tier switch."
-            )
-
-        # 6. Score floor + category/topic premiums
-        day_type  = self._classify_day()
-        min_score = self._min_score_for(lane, day_type)
-
-        cat_premium   = self._category_repeat_premium(entry.category, now)
-        topic_penalty = self._topic_repeat_penalty(entry.title, now)
-        min_score    += cat_premium + topic_penalty
-
-        # South Asia regional exemption — Pakistan / India stories get a
-        # 15-point floor reduction to ensure regional coverage is not
-        # starved out by thin RSS summaries.
-        SOUTH_ASIA_KEYWORDS = [
-            "pakistan", "india", "islamabad", "karachi", "lahore", "delhi",
-            "mumbai", "kashmir", "sindh", "punjab", "modi", "nawaz", "imran",
-            "indian", "pakistani", "bangladesh", "karnataka",
-        ]
-        title_lower = entry.title.lower()
-        if any(k in title_lower for k in SOUTH_ASIA_KEYWORDS):
-            min_score = max(min_score - 15.0, SCORE_HOLD)
-
-        if score < min_score:
-            parts = [f"base={self._min_score_for(lane, day_type):.0f}"]
-            if cat_premium:   parts.append(f"+cat={cat_premium:.0f}")
-            if topic_penalty: parts.append(f"+topic={topic_penalty:.0f}")
-            return False, (
-                f"Score {score:.1f} < floor {min_score:.1f} "
-                f"[{' '.join(parts)}] lane={lane.value} day={day_type}"
-            )
-
-        # 7. HOLD only surfaces on LOW_NEWS days
-        if lane == Route.HOLD and day_type != DayType.LOW_NEWS:
-            return False, f"HOLD surfaces only on LOW_NEWS days (today: {day_type})"
-
-        # 8. PUBLISH_NOW token bucket (Feature #5)
         if lane == Route.PUBLISH_NOW:
-            if last_breaking_at is not None:
-                gap = now - last_breaking_at
-                if gap < PUBLISH_NOW_MIN_GAP:
-                    wait = int((PUBLISH_NOW_MIN_GAP - gap).total_seconds() / 60)
-                    return False, f"🚨 Breaking cooldown — {wait}m remaining (10-min gap)"
-            return True, f"🚨 PUBLISH NOW [{score:.1f}]"
+            previous = last_published_at or self.last_published_at()
+            if previous and now - previous < PUBLISH_NOW_MIN_GAP:
+                remaining = PUBLISH_NOW_MIN_GAP - (now - previous)
+                return False, f"Tier 1 cooldown — {max(1, int(remaining.total_seconds() / 60))}m remaining"
+            return True, f"Tier 1 publish now [{entry.score:.1f}]"
 
-        # 9. SCHEDULE window awareness + slot reservation (Feature #1, #6)
-        if lane == Route.SCHEDULE:
-            in_window, window_label = self._in_scheduled_window(now)
-            if not in_window:
-                next_w = self._next_window_label(now)
-                return False, f"📅 Waiting for scheduled window (next: {next_w})"
-            # Slot reservation: only the top-scoring SCHEDULE story takes this window
-            if not self._is_top_schedule_story(entry):
-                return False, f"📅 Slot taken by higher-scoring story in window {window_label}"
-            return True, f"📅 SCHEDULED [{score:.1f}] window={window_label}"
+        if entry.score < SCORE_SCHEDULE:
+            return False, f"Score {entry.score:.1f} is below Tier 2 floor {SCORE_SCHEDULE:.0f}"
+        if self.tier2_published_count() >= TIER2_DAILY_LIMIT:
+            return False, f"Tier 2 daily limit ({self.tier2_published_count()}/{TIER2_DAILY_LIMIT})"
 
-        # 10. NEXT_SLOT — 30-min gap
-        if lane == Route.NEXT_SLOT:
-            if last_published_at is not None:
-                gap = now - last_published_at
-                if gap < NEXT_SLOT_INTERVAL:
-                    wait = int((NEXT_SLOT_INTERVAL - gap).total_seconds() / 60)
-                    return False, f"⚡ NEXT_SLOT — {wait}m remaining (30-min gap)"
-            return True, f"⚡ NEXT SLOT [{score:.1f}]"
-
-        # 11. HOLD — 1-hr gap (low-news day, already gated in step 7)
-        if lane == Route.HOLD:
-            if last_published_at is not None:
-                gap = now - last_published_at
-                if gap < SCHEDULE_INTERVAL:
-                    wait = int((SCHEDULE_INTERVAL - gap).total_seconds() / 60)
-                    return False, f"🗂️ HOLD — {wait}m remaining (1-hr gap)"
-            return True, f"🗂️ HOLD surfaced [{score:.1f}] (low-news day)"
-
-        return True, f"Clears editorial bar [{score:.1f}]"
+        previous = last_published_at or self.last_published_at()
+        if previous and now - previous < NEXT_SLOT_INTERVAL:
+            remaining = NEXT_SLOT_INTERVAL - (now - previous)
+            return False, f"Tier 2 interval — {max(1, int(remaining.total_seconds() / 60))}m remaining"
+        if not self._is_top_schedule_story(entry):
+            return False, "Waiting behind a higher-scoring Tier 2 story"
+        return True, f"Tier 2 next slot [{entry.score:.1f}]"
 
     def next_publishable(
         self,
@@ -506,6 +374,12 @@ class PostingQueue:
         changed = 0
         for entry in self._entries:
             if entry.status != "QUEUED":
+                continue
+            if entry.route_enum != Route.PUBLISH_NOW and entry.score < SCORE_SCHEDULE:
+                entry.status = "EXPIRED"
+                self._audit(entry.title, entry.score, entry.category_tier,
+                            entry.route_enum, "EXPIRED", "Below Tier 2 floor of 65")
+                changed += 1
                 continue
             entry_changed = False
             # A very old PUBLISH_NOW entry may need more than one transition
@@ -557,6 +431,7 @@ class PostingQueue:
                 category=story.category,
                 score=score,
                 queued_at=datetime.now(timezone.utc).isoformat(),
+                source_published_at=story.published_at.isoformat() if story.published_at else None,
                 is_breaking=True,
                 category_tier=effective_tier,
                 route=Route.PUBLISH_NOW.value,
@@ -592,6 +467,15 @@ class PostingQueue:
             logger.debug("Skipped (%s): %s", reason, entry.title[:50])
         self._save()
 
+    def mark_retry(self, entry: QueueEntry, reason: str = "") -> None:
+        """Preserve a publishable story after a temporary delivery failure."""
+        entry.status = "QUEUED"
+        entry.publish_attempts += 1
+        entry.last_publish_error = reason
+        self._audit(entry.title, entry.score, entry.category_tier,
+                    entry.route_enum, "RETRY", reason)
+        self._save()
+
     def mark_review_required(self, entry: QueueEntry, reason: str = "") -> None:
         """Remove an unverified legacy entry from automatic publishing."""
         entry.status = "REVIEW_REQUIRED"
@@ -603,15 +487,29 @@ class PostingQueue:
         self._save()
 
     def daily_published_count(self) -> int:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now().astimezone().date()
         return sum(
             1 for e in self._entries
             if e.status == "PUBLISHED" and e.published_at
-            and datetime.fromisoformat(e.published_at).date() == today
+            and datetime.fromisoformat(e.published_at).astimezone().date() == today
         )
 
     def can_publish_today(self) -> bool:
-        return self.daily_published_count() < HARD_DAILY_CEILING
+        return self.tier2_published_count() < TIER2_DAILY_LIMIT
+
+    def tier1_published_count(self) -> int:
+        today = datetime.now().astimezone().date()
+        return sum(1 for e in self._entries if e.status == "PUBLISHED" and e.published_at
+                   and e.route_enum == Route.PUBLISH_NOW
+                   and datetime.fromisoformat(e.published_at).astimezone().date() == today)
+
+    def tier2_published_count(self) -> int:
+        return self.daily_published_count() - self.tier1_published_count()
+
+    def last_published_at(self) -> Optional[datetime]:
+        times = [datetime.fromisoformat(e.published_at) for e in self._entries
+                 if e.status == "PUBLISHED" and e.published_at]
+        return max(times) if times else None
 
     def queued_count(self) -> int:
         return sum(1 for e in self._entries if e.status == "QUEUED")
@@ -654,27 +552,12 @@ class PostingQueue:
             self._save()
 
     def summary(self) -> str:
-        day_type  = self._classify_day()
-        published = self.daily_published_count()
         lanes     = self.queued_by_lane()
-        t1 = self._tier_daily_count(1)
-        t2 = self._tier_daily_count(2)
-        t3 = self._tier_daily_count(3)
-        fatigued  = self._fatigued_tier()
-        now       = datetime.now(timezone.utc)
-        in_win, win_label = self._in_scheduled_window(now)
-        dead_note = " | 🌙 DEAD HOURS" if self.is_dead_hours() else ""
-        win_note  = f" | ⏰ {win_label}" if in_win else f" | next: {self._next_window_label(now)}"
-        fat_note  = f" | 😴 T{fatigued} fatigued" if fatigued else ""
-        lane_str  = (
-            f"🚨{lanes['PUBLISH_NOW']} ⚡{lanes['NEXT_SLOT']} "
-            f"📅{lanes['SCHEDULE']} 🗂️{lanes['HOLD']}"
-        )
         return (
-            f"{self.queued_count()} queued [{lane_str}] | "
-            f"{published} published [{day_type}] "
-            f"[T1:{t1}/{TIER_DAILY_SLOTS[1]} T2:{t2}/{TIER_DAILY_SLOTS[2]} T3:{t3}/{TIER_DAILY_SLOTS[3]}]"
-            f"{dead_note}{win_note}{fat_note}"
+            f"{self.queued_count()} queued "
+            f"[Tier 1:{lanes['PUBLISH_NOW']} Tier 2:{self.queued_count() - lanes['PUBLISH_NOW']}] | "
+            f"published today [Tier 1:{self.tier1_published_count()} unlimited "
+            f"Tier 2:{self.tier2_published_count()}/{TIER2_DAILY_LIMIT}]"
         )
 
     # ------------------------------------------------------------------
@@ -733,17 +616,7 @@ class PostingQueue:
     # ------------------------------------------------------------------
 
     def _check_ttl(self, entry: QueueEntry, now: datetime) -> Optional[tuple[bool, str]]:
-        """
-        Check if this entry has exceeded its lane TTL.
-
-        - PUBLISH_NOW expired → downgrade to NEXT_SLOT, return None (still publishable)
-        - NEXT_SLOT expired   → downgrade to SCHEDULE, return None
-        - SCHEDULE expired    → mark EXPIRED, return (False, reason)
-        - HOLD expired        → mark EXPIRED, return (False, reason)
-
-        Returns None if no TTL action was taken (entry is still valid in its lane).
-        Returns (False, reason) if the entry was expired.
-        """
+        """Expire a queued story 48 hours after its source publication time."""
         lane = entry.route_enum
         ttl  = LANE_TTL.get(lane.value)
         if ttl is None:
@@ -753,41 +626,9 @@ class PostingQueue:
         if age <= ttl:
             return None   # still fresh
 
-        # Downgrade PUBLISH_NOW → NEXT_SLOT (Feature #3)
-        if lane == Route.PUBLISH_NOW:
-            logger.info(
-                "⬇️  TTL: PUBLISH_NOW→NEXT_SLOT after %.0f min: %s",
-                age.total_seconds() / 60, entry.title[:55],
-            )
-            entry.downgraded_from = Route.PUBLISH_NOW.value
-            entry.route           = Route.NEXT_SLOT.value
-            entry.is_breaking     = False
-            self._audit(
-                entry.title, entry.score, entry.category_tier,
-                Route.PUBLISH_NOW, "DOWNGRADED",
-                f"TTL {ttl} exceeded ({age.total_seconds()/3600:.1f}h) → NEXT_SLOT",
-            )
-            return None   # still publishable in new lane
-
-        # Downgrade NEXT_SLOT → SCHEDULE (Feature #3)
-        if lane == Route.NEXT_SLOT:
-            logger.info(
-                "⬇️  TTL: NEXT_SLOT→SCHEDULE after %.0f min: %s",
-                age.total_seconds() / 60, entry.title[:55],
-            )
-            entry.downgraded_from = entry.downgraded_from or Route.NEXT_SLOT.value
-            entry.route           = Route.SCHEDULE.value
-            self._audit(
-                entry.title, entry.score, entry.category_tier,
-                Route.NEXT_SLOT, "DOWNGRADED",
-                f"TTL {ttl} exceeded ({age.total_seconds()/3600:.1f}h) → SCHEDULE",
-            )
-            return None   # still publishable in new lane
-
-        # Expire SCHEDULE and HOLD
         entry.status = "EXPIRED"
         reason = (
-            f"TTL expired: {lane.value} stories live max "
+            f"Freshness expired: {lane.value} stories remain queued for "
             f"{int(ttl.total_seconds()/3600)}h (age: {age.total_seconds()/3600:.1f}h)"
         )
         logger.info("🗑️  Expired [%s]: %s", lane.value, entry.title[:55])
@@ -886,23 +727,16 @@ class PostingQueue:
     # ------------------------------------------------------------------
 
     def _is_top_schedule_story(self, entry: QueueEntry) -> bool:
-        """
-        Slot reservation with category mix.
-
-        Each scheduled window publishes up to one story per tier (T1/T2/T3).
-        An entry wins its slot if it is the highest-scoring SCHEDULE story
-        within its own tier. This ensures every window has natural variety
-        rather than publishing three politics stories back-to-back.
-        """
-        same_tier_queued = [
+        """Return whether entry is the globally highest-scoring regular story."""
+        regular = [
             e for e in self._entries
             if e.status == "QUEUED"
-            and e.route == Route.SCHEDULE.value
-            and e.category_tier == entry.category_tier
+            and e.route_enum != Route.PUBLISH_NOW
+            and e.score >= SCORE_SCHEDULE
         ]
-        if not same_tier_queued:
+        if not regular:
             return True
-        best = max(same_tier_queued, key=lambda e: e.score)
+        best = min(regular, key=lambda e: (-e.score, e.queued_at))
         return entry.source_url == best.source_url
 
     def window_slot_picks(self) -> list[QueueEntry]:
@@ -1064,6 +898,9 @@ class PostingQueue:
                 e.setdefault("policy_categories",   [])
                 e.setdefault("policy_reasons",      [])
                 e.setdefault("policy_version",      "")
+                e.setdefault("source_published_at", e.get("queued_at"))
+                e.setdefault("publish_attempts", 0)
+                e.setdefault("last_publish_error", "")
                 e.setdefault(
                     "verification_reason",
                     "Legacy queue entry has no independent-source verification evidence.",

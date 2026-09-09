@@ -11,6 +11,7 @@ from image.maker import (
     _headline_display_case,
     _apply_image_provenance,
     _image_description_matches,
+    _keywords,
     _synthetic_image_allowed,
     _smart_crop,
     _source_display_name,
@@ -21,6 +22,13 @@ from image.maker import (
 def test_stock_metadata_must_overlap_query():
     assert _image_description_matches("Canada tariffs", "Canadian flag outside parliament")
     assert not _image_description_matches("Canada tariffs", "Laptop on an office desk")
+    assert not _image_description_matches("u.s", "Woman standing beside scooter")
+
+
+def test_visual_query_uses_story_subject_instead_of_country_abbreviation():
+    title = "U.S. military says it destroyed 5 Iranian oil tankers"
+    assert _keywords(title) == "oil tanker ship ocean"
+    assert _keywords(title, broad=True) == "oil tanker"
 
 
 def test_headline_display_case_preserves_news_acronyms():

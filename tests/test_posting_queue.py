@@ -14,8 +14,8 @@ from pipeline.posting_queue import PostingQueue, QueueEntry, Route, route_story 
 def test_routing_is_immediate_moderate_or_reject():
     assert route_story(80, 3) == Route.PUBLISH_NOW
     assert route_story(79.9, 1) == Route.SCHEDULE
-    assert route_story(60, 3) == Route.SCHEDULE
-    assert route_story(59.9, 1) == Route.REJECT
+    assert route_story(65, 3) == Route.SCHEDULE
+    assert route_story(64.9, 1) == Route.REJECT
     assert route_story(65, 3, impact_score=10) == Route.PUBLISH_NOW
 
 
@@ -62,10 +62,10 @@ def test_high_impact_metadata_survives_retry_queue(tmp_path):
         assert entry.card_description == story.card_description
 
 
-def test_expire_stale_persists_all_required_downgrades(tmp_path):
+def test_entries_remain_queued_until_48_hour_freshness_limit(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"
-    queued_at = (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat()
+    queued_at = (datetime.now(timezone.utc) - timedelta(hours=47)).isoformat()
 
     with (
         patch("pipeline.posting_queue.QUEUE_FILE", queue_path),
@@ -87,13 +87,47 @@ def test_expire_stale_persists_all_required_downgrades(tmp_path):
         ]
         queue._save()
 
-        assert queue.expire_stale() == 1
+        assert queue.expire_stale() == 0
 
         reloaded = PostingQueue()
         entry = reloaded._entries[0]
-        assert entry.route == Route.SCHEDULE.value
-        assert entry.downgraded_from == Route.PUBLISH_NOW.value
-        assert entry.is_breaking is False
+        assert entry.route == Route.PUBLISH_NOW.value
+        assert entry.status == "QUEUED"
+
+
+def test_regular_queue_is_global_score_first_and_retries_are_preserved(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        lower = QueueEntry("Lower", "A", "https://a.test", "world", 70, now.isoformat())
+        higher = QueueEntry("Higher", "B", "https://b.test", "business", 79, now.isoformat())
+        queue._entries = [lower, higher]
+        assert queue.deserves_publishing(lower, None)[0] is False
+        assert queue.deserves_publishing(higher, None)[0] is True
+        queue.mark_retry(higher, "temporary Graph API failure")
+        assert higher.status == "QUEUED"
+        assert higher.publish_attempts == 1
+
+
+def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        queue._entries = [
+            QueueEntry(f"Regular {i}", "A", f"https://a.test/{i}", "world", 70,
+                       now.isoformat(), route=Route.SCHEDULE.value, status="PUBLISHED",
+                       published_at=(now - timedelta(hours=2)).isoformat())
+            for i in range(12)
+        ]
+        breaking = QueueEntry("Breaking", "B", "https://b.test", "breaking", 90,
+                              now.isoformat(), route=Route.PUBLISH_NOW.value)
+        assert queue.can_publish_today() is False
+        assert queue.deserves_publishing(breaking, now - timedelta(minutes=11))[0] is True
+        assert queue.deserves_publishing(breaking, now - timedelta(minutes=5))[0] is False
 
 
 def test_provisional_story_is_saved_for_review_not_auto_queue(tmp_path):

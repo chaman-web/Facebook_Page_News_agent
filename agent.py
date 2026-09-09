@@ -37,8 +37,8 @@ Pipeline:
   STAGE 7  — POSTING QUEUE
       ↓      Only fully-built posts enter. Queue = ready to fire.
       ├── HIGH VALUE/IMPACT → PUBLISH NOW (score ≥ 80 or impact ≥ 10)
-      ├── MODERATE          → SCHEDULE    (score 60–79)
-      └── LOW VALUE         → REJECT      (score < 60)
+      ├── MODERATE          → TIER 2      (score 65–79.9; 30-minute slots)
+      └── LOW VALUE         → REJECT      (score < 65)
       ↓
   STAGE 8  — PUBLISH
              Facebook Graph API — verified image-card posts only
@@ -94,6 +94,7 @@ from pipeline.posting_queue import (
     PostingQueue,
     Route,
 )
+from pipeline.process_lock import PipelineBusy, pipeline_lock
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
 
@@ -336,7 +337,7 @@ def fetch_and_build(
         logger.info("No strong stories found — allowing HOLD-tier fillers.")
         scored = score_and_filter(verification_candidates, allow_hold=True)
     if not scored:
-        logger.warning("All stories scored below 60. Nothing to queue.")
+        logger.warning("All stories scored below 65. Nothing to queue.")
         metrics["scoring_rejected"] = len(verification_candidates)
         return finish("empty", 0)
     metrics["scoring_rejected"] = max(0, len(verification_candidates) - len(scored))
@@ -596,7 +597,7 @@ def fetch_and_build(
 
     direct_published = 0
     direct_failed = 0
-    last_direct_publish_at: datetime | None = None
+    last_direct_publish_at: datetime | None = queue.last_published_at()
     if immediate_posts:
         from facebook.publisher import publish_post_with_image
         for escore, story, image_path in immediate_posts:
@@ -767,10 +768,10 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
     logger.info("Queue: %s", queue.summary())
 
-    # Hard ceiling check — PUBLISH_NOW stories bypass this
+    # Tier 2 daily limit — PUBLISH_NOW stories bypass this
     has_breaking = any(e.route == Route.PUBLISH_NOW.value for e in queued)
     if not queue.can_publish_today() and not has_breaking:
-        logger.warning("Hard safety ceiling (%d) reached. Nothing published.", HARD_DAILY_CEILING)
+        logger.warning("Tier 2 daily limit (%d) reached. Nothing published.", HARD_DAILY_CEILING)
         metrics["deferred"] = len(queued)
         return finish("deferred", 0)
 
@@ -783,7 +784,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
     published_count  = 0
     failed_count     = 0
-    last_published_at: datetime | None = None
+    last_published_at: datetime | None = queue.last_published_at()
     last_breaking_at:  datetime | None = queue.last_breaking_published_at()
 
     # Sort queue: highest priority first
@@ -796,7 +797,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             break
 
         if not queue.can_publish_today() and entry.route != Route.PUBLISH_NOW.value:
-            logger.warning("Hard safety ceiling reached mid-run. Stopping.")
+            logger.warning("Tier 2 daily limit reached mid-run. Stopping.")
             break
 
         # Defense in depth: legacy queue entries and provisional stories must
@@ -920,7 +921,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
 
         except FacebookPublishError as exc:
             logger.error("Facebook publish failed: %s", exc)
-            queue.mark_skipped(entry, f"publish error: {exc}")
+            queue.mark_retry(entry, f"publish error: {exc}")
             failed_count += 1
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
@@ -983,7 +984,7 @@ def main(
         else:
             publishable = []
             skipped = []
-            last_published_at = None
+            last_published_at = queue.last_published_at()
             last_breaking_at = queue.last_breaking_published_at()
             for entry in queued:
                 if entry.verification_status != VerificationStatus.VERIFIED.value:
@@ -1086,19 +1087,20 @@ def _print_queue_status(queue: PostingQueue) -> None:
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("  Global Pulse News — Queue Status")
     logger.info("  Day type        : %s", day_type)
-    logger.info("  Published today : %d  (ceiling: %d)", today, HARD_DAILY_CEILING)
+    logger.info("  Published today : %d (Tier 1: %d; Tier 2: %d/%d)",
+                today, queue.tier1_published_count(), queue.tier2_published_count(), HARD_DAILY_CEILING)
     logger.info("  Currently queued: %d stories", queued)
     logger.info("  %s", queue.summary())
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
     entries = [e for e in queue._entries if e.status == "QUEUED"]
     if entries:
-        entries.sort(key=lambda e: (e.category_tier, -e.score))
+        entries.sort(key=lambda e: (e.route_enum.priority, -e.score, e.queued_at))
         for i, e in enumerate(entries[:10], 1):
-            tier_icon = {1: "🔴", 2: "🟠", 3: "🟡"}.get(e.category_tier, "⚪")
+            tier_icon = "🔴" if e.route_enum == Route.PUBLISH_NOW else "🟡"
             logger.info(
-                "  %s %d. [T%d | %.1f] %-12s %s",
-                tier_icon, i, e.category_tier, e.score,
+                "  %s %d. [%s | %.1f] %-12s %s",
+                tier_icon, i, "TIER 1" if e.route_enum == Route.PUBLISH_NOW else "TIER 2", e.score,
                 e.category.upper()[:12], e.title[:60],
             )
 
@@ -1131,7 +1133,7 @@ Examples:
                         help="Single category to fetch (default: all).")
     parser.add_argument("--all-categories", action="store_true",  help="Fetch all 14 categories.")
     parser.add_argument("--queue-status",   action="store_true",  help="Show queue status and exit.")
-    parser.add_argument("--force-now",      action="store_true",  help="Bypass scheduled window — publish immediately.")
+    parser.add_argument("--force-now",      action="store_true",  help="Bypass queue timing — publish immediately.")
     parser.add_argument("--engagement-report", action="store_true",
                         help="Collect reactions, comments and shares for published posts.")
     args = parser.parse_args()
@@ -1145,15 +1147,19 @@ Examples:
         a.startswith("--category") for a in sys.argv[1:]
     ))
 
-    sys.exit(main(
-        dry_run        = args.dry_run,
-        fetch          = args.fetch,
-        publish        = args.publish,
-        count          = args.count,
-        category       = args.category,
-        all_categories = all_cats,
-        with_image     = args.image,
-        queue_status   = args.queue_status,
-        force_now      = args.force_now,
-        engagement_report = args.engagement_report,
-    ))
+    def run() -> int:
+        return main(
+            dry_run=args.dry_run, fetch=args.fetch, publish=args.publish,
+            count=args.count, category=args.category, all_categories=all_cats,
+            with_image=args.image, queue_status=args.queue_status,
+            force_now=args.force_now, engagement_report=args.engagement_report,
+        )
+
+    if (args.fetch or args.publish) and not args.dry_run:
+        try:
+            with pipeline_lock(Path(__file__).parent / ".pipeline.lock"):
+                sys.exit(run())
+        except PipelineBusy as exc:
+            logger.info("Pipeline job deferred: %s. The next scheduled run will retry.", exc)
+            sys.exit(0)
+    sys.exit(run())

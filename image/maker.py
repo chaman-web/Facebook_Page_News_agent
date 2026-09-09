@@ -770,9 +770,16 @@ def _relevance_terms(text: str) -> set[str]:
     stop = {
         "about", "after", "before", "from", "have", "image", "news", "photo",
         "says", "that", "their", "this", "with", "world", "people", "person",
+        "destroyed", "major", "latest", "update", "breaking", "amid", "over",
+    }
+    aliases = {
+        "tanker": "ship", "tankers": "ship", "vessel": "ship", "vessels": "ship",
+        "warship": "ship", "warships": "ship", "jet": "plane", "jets": "plane",
+        "crude": "oil",
     }
     return {
-        word.lower() for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text or "")
+        aliases.get(word.lower(), word.lower())
+        for word in re.findall(r"\b[A-Za-z][A-Za-z'-]{2,}\b", text or "")
         if word.lower() not in stop
     }
 
@@ -782,7 +789,7 @@ def _image_description_matches(query: str, description: str) -> bool:
     query_terms = _relevance_terms(query)
     description_terms = _relevance_terms(description)
     if not query_terms or not description_terms:
-        return True
+        return False
     return bool(query_terms & description_terms) or any(
         len(left) >= 5 and len(right) >= 5 and left[:5] == right[:5]
         for left in query_terms for right in description_terms
@@ -1274,6 +1281,23 @@ def _headline_display_case(headline: str) -> str:
 
 
 def _keywords(title: str, broad: bool = False) -> str:
+    lowered = title.lower()
+    visual_queries = (
+        (("oil tanker", "tanker", "oil ship"), ("oil tanker ship ocean", "oil tanker")),
+        (("plane crash", "air crash", "cargo jet"), ("airplane airport runway", "airplane")),
+        (("earthquake",), ("earthquake damaged buildings", "earthquake")),
+        (("flood",), ("flooded city rescue", "flood")),
+        (("wildfire", "forest fire"), ("wildfire firefighters", "wildfire")),
+        (("election", "vote"), ("election ballot voters", "election")),
+        (("parliament",), ("parliament government building", "parliament")),
+        (("iphone", "apple phone"), ("apple iphone smartphone", "smartphone")),
+        (("tariff",), ("shipping containers international trade", "international trade")),
+        (("oil price",), ("oil barrels energy market", "oil barrels")),
+    )
+    for triggers, queries in visual_queries:
+        if any(trigger in lowered for trigger in triggers):
+            return queries[1] if broad else queries[0]
+
     stop = {
         "the","a","an","and","or","but","in","on","at","to","for","of","with",
         "by","from","as","is","was","are","were","be","been","its","this","that",
@@ -1286,5 +1310,5 @@ def _keywords(title: str, broad: bool = False) -> str:
         if w.strip(".,!?:;\"'()[]—–-") not in stop and len(w) > 2
     ]
     if broad:
-        return words[0] if words else "world news"
+        return " ".join(words[-2:]) if words else "world news"
     return " ".join(words[:3]) if words else "world news"
