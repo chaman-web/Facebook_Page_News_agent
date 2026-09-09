@@ -252,6 +252,20 @@ def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):
         assert queue.deserves_publishing(breaking, now - timedelta(minutes=5))[0] is False
 
 
+def test_tier2_failure_backoff_does_not_block_next_ranked_story(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        failed = QueueEntry("Top", "A", "https://a.test/top", "world", 78, now.isoformat())
+        next_story = QueueEntry("Next", "B", "https://b.test/next", "world", 75, now.isoformat())
+        queue._entries = [failed, next_story]
+        queue.mark_retry(failed, "temporary Facebook failure")
+
+        assert queue.deserves_publishing(next_story, None)[0] is True
+
+
 def test_provisional_story_is_saved_for_review_not_auto_queue(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"

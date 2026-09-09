@@ -437,9 +437,14 @@ class PostingQueue:
             self._save()
         return changed
 
-    def mark_published(self, entry: QueueEntry, post_id: Optional[str] = None) -> None:
+    def mark_published(
+        self,
+        entry: QueueEntry,
+        post_id: Optional[str] = None,
+        published_at: Optional[str] = None,
+    ) -> None:
         entry.status       = "PUBLISHED"
-        entry.published_at = datetime.now(timezone.utc).isoformat()
+        entry.published_at = published_at or datetime.now(timezone.utc).isoformat()
         entry.facebook_post_id = post_id
         entry.next_retry_at = None
         entry.last_publish_error = ""
@@ -850,11 +855,16 @@ class PostingQueue:
 
     def _is_top_schedule_story(self, entry: QueueEntry) -> bool:
         """Return whether entry is the globally highest-scoring regular story."""
+        now = datetime.now(timezone.utc)
         regular = [
             e for e in self._entries
             if e.status == "QUEUED"
             and e.route_enum != Route.PUBLISH_NOW
             and e.score >= SCORE_SCHEDULE
+            and (
+                not e.next_retry_at
+                or datetime.fromisoformat(e.next_retry_at) <= now
+            )
         ]
         if not regular:
             return True

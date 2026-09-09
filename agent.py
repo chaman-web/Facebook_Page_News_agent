@@ -77,7 +77,7 @@ from pipeline.content_validator import ContentValidationError, validate_post
 from pipeline.deduplicator import filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
 from pipeline.editorial_scorer import EditorialTier, score_and_filter, score_story
-from pipeline.final_quality_check import FinalQualityError, final_quality_check
+from pipeline.final_quality_check import FinalQualityError, final_quality_check, remember_post
 from pipeline.generator import generate_post, reset_generation_backend_state
 from pipeline.high_value_backlog import pending_stories, remember, resolve
 from pipeline.log_retention import retained_log_handler
@@ -632,10 +632,21 @@ def fetch_and_build(
     last_direct_publish_at: datetime | None = queue.last_published_at()
     if immediate_posts:
         from facebook.publisher import publish_post_with_image
+        from pipeline.publish_receipts import record_publish_receipt
         for escore, story, image_path in immediate_posts:
+            post_id: str | None = None
+            receipt_saved = False
             try:
                 _wait_for_immediate_spacing(last_direct_publish_at)
                 post_id = publish_post_with_image(story, Path(image_path))
+                try:
+                    record_publish_receipt(story.source_url, story.title, post_id)
+                    receipt_saved = True
+                except OSError as receipt_exc:
+                    logger.error(
+                        "Facebook accepted immediate post but receipt write failed: %s",
+                        receipt_exc,
+                    )
                 queue.record_direct_publish(
                     story, escore.total, escore.effective_tier_num,
                     Path(image_path), post_id,
@@ -649,6 +660,22 @@ def fetch_and_build(
                 last_direct_publish_at = datetime.now(timezone.utc)
                 logger.info("✅ Published immediately [%.1f]: %s", escore.total, story.title[:60])
             except Exception as exc:
+                if post_id:
+                    if receipt_saved:
+                        logger.error(
+                            "Immediate post delivered but bookkeeping failed; receipt retained: %s",
+                            exc,
+                        )
+                    else:
+                        logger.critical(
+                            "Immediate post delivered but both durable records failed: %s",
+                            exc,
+                        )
+                    record_published_title(story.title)
+                    mark_seen(story, permanent=True)
+                    direct_published += 1
+                    last_direct_publish_at = datetime.now(timezone.utc)
+                    continue
                 # Preserve the story for an automatic retry if Facebook is
                 # temporarily unavailable; normal high-value flow never waits.
                 logger.error("Immediate publish failed; queued for retry: %s", exc)
@@ -763,6 +790,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     No fetching, no generation, no image building — just API calls.
     count=0 means publish all that pass the editorial gate right now.
     """
+    started_at = time.monotonic()
     from facebook.token_validator import validate_token_or_exit
     validate_token_or_exit(exit_on_failure=True)
 
@@ -774,17 +802,28 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         "failed": 0,
         "review_required": 0,
         "deferred": 0,
+        "reconciled": 0,
     }
 
     def finish(status: str, result: int) -> int:
         accounted = metrics["published"] + metrics["failed"] + metrics["review_required"]
         metrics["deferred"] = max(metrics["deferred"], metrics["queued"] - accounted)
+        metrics["duration_seconds"] = round(time.monotonic() - started_at, 1)
         _write_run_summary("publish", status, metrics)
         return result
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("  Global Pulse News — Publish from Queue")
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+    from pipeline.publish_receipts import reconcile_publish_receipts
+    reconciled = reconcile_publish_receipts(queue)
+    metrics["reconciled"] = reconciled
+    if reconciled:
+        logger.warning(
+            "Recovered %d prior Facebook delivery receipt(s); duplicate publishing prevented.",
+            reconciled,
+        )
 
     # Expire stale entries first
     expired = queue.expire_stale()
@@ -813,6 +852,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         publish_post,
         publish_post_with_image,
     )
+    from pipeline.publish_receipts import record_publish_receipt
 
     published_count  = 0
     failed_count     = 0
@@ -916,20 +956,52 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             record_policy_decision(story, policy_verdict, "QUEUE_REVIEW")
             continue
 
-        # The evidence-rich draft was already saved during the fetch stage.
+        # Re-run mutable quality checks immediately before delivery. Queue
+        # entries can wait for hours, and legacy text may need safe cleanup.
+        try:
+            story = validate_post(story)
+            final_quality_check(story, image_path=image_path, remember=False)
+        except (ContentValidationError, FinalQualityError) as exc:
+            reason = f"Final publishing preflight failed: {exc}"
+            logger.warning("📝 Review required — %s | %s", entry.title[:60], reason)
+            queue.mark_review_required(entry, reason)
+            metrics["review_required"] += 1
+            continue
 
         try:
             post_id = publish_post_with_image(story, image_path)
+            published_at = datetime.now(timezone.utc).isoformat()
+            try:
+                receipt = record_publish_receipt(
+                    entry.source_url,
+                    entry.title,
+                    post_id,
+                    published_at=published_at,
+                )
+                published_at = receipt["published_at"]
+            except OSError as receipt_exc:
+                logger.error(
+                    "Facebook accepted queued post but receipt write failed; "
+                    "continuing queue bookkeeping: %s",
+                    receipt_exc,
+                )
             logger.info("✅ [%d] Published with image. Post ID: %s | %s",
                 published_count + 1, post_id, entry.title[:60])
 
-            queue.mark_published(entry, post_id=post_id)
+            queue.mark_published(
+                entry,
+                post_id=post_id,
+                published_at=published_at,
+            )
+            remember_post(story.post_content)
             record_published_title(entry.title)
             mark_seen(story, permanent=True)
             last_published_at = datetime.now(timezone.utc)
             if entry.is_breaking:
                 last_breaking_at = last_published_at
             published_count += 1
+            metrics["last_post_id"] = post_id
+            metrics["last_title"] = entry.title[:80]
 
             # Clean up image file after successful publish
             if image_path and image_path.exists():
@@ -955,6 +1027,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.error("Facebook publish failed: %s", exc)
             queue.mark_retry(entry, f"publish error: {exc}")
             failed_count += 1
+            metrics["last_failure"] = str(exc)[:160]
 
     logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("Done. %d published. %d failed. Queue: %s",
