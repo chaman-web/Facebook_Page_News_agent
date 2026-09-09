@@ -17,16 +17,21 @@ SCORING BREAKDOWN (100 points total):
 └──────────────────────────────────────────┴────────┘
 │ TOTAL (pre-multiplier)                   │  100   │
 │ Category multiplier applied after total  │        │
-│   breaking/war/crime/world → ×1.10       │        │
-│   trending/entertainment   → ×0.95       │        │
+│   breaking/war ×1.15; world ×1.12        │        │
+│   crime/politics ×1.10; Tier 2 ×1.05     │        │
+│   entertainment/trending ×0.92           │        │
+│   jobs/wellness ×0.95                    │        │
 └──────────────────────────────────────────┴────────┘
 
-THRESHOLDS (after multiplier, capped at 100):
-  90–100 → PRIORITY / BREAKING   → publish immediately, bypass interval
-  80–89  → HIGH PRIORITY         → publish in next slot
-  70–79  → PUBLISH               → normal queue
-  60–69  → SCHEDULE / HOLD       → filler only — publish if nothing better available
-  < 60   → DO NOT PUBLISH        → rejected outright
+EDITORIAL CLASSIFICATION (after multiplier, capped at 100):
+  90–100 → PRIORITY / BREAKING
+  80–89  → HIGH PRIORITY
+  70–79  → PUBLISH
+  60–69  → SCHEDULE / HOLD
+  < 60   → DO NOT PUBLISH
+
+QUEUE ROUTING is separate: score >=80 or impact_score >=10 publishes now;
+verified scores 60–79.9 enter the scheduled lane; scores below 60 are rejected.
 
 VERIFICATION IS A SEPARATE GATE:
   This module measures editorial importance only. A high score preserves a
@@ -77,6 +82,8 @@ class EditorialScore:
     tier_was_overridden:  bool    = False
     impact_score:         float   = 0.0
     impact_reasons:       tuple[str, ...] = ()
+    shadow_total:         float   = 0.0
+    shadow_tier:          EditorialTier = EditorialTier.REJECT
 
     def is_publishable(self) -> bool:
         return self.tier != EditorialTier.REJECT
@@ -233,7 +240,7 @@ _VISUAL_TOPICS = [
 #
 # Tier 1 — Immediate priority (major global impact)
 #   breaking, war, world, crime, politics
-#   Multiplier: ×1.15  |  Score floor boost: +8 pts before multiplier
+#   Multiplier: ×1.10–1.15  |  Score floor boost: +8 pts before multiplier
 #
 # Tier 2 — Strong regular content
 #   sports, business, technology, climate, science
@@ -241,7 +248,7 @@ _VISUAL_TOPICS = [
 #
 # Tier 3 — Supporting content
 #   entertainment, trending, jobs, wellness
-#   Multiplier: ×0.92  |  Score cap: 85 (can never outrank a major Tier 1 story)
+#   Multiplier: ×0.92–0.95  |  Score cap: 85
 #
 # A Tier 3 story can still score 70–84 and get published — it just cannot
 # beat a Tier 1 story for the same publishing slot.
@@ -450,6 +457,16 @@ def score_story(story: Story) -> EditorialScore:
             total = max(total, 72.0)
 
     tier  = _classify_tier(total)
+    shadow_total = _keyword_reduced_shadow_total(
+        story=story,
+        text=text,
+        title=title,
+        source_credibility=source_credibility,
+        freshness=freshness,
+        visual_potential=visual_potential,
+        impact_score=impact_score,
+    )
+    shadow_tier = _classify_tier(shadow_total)
 
     reason = _build_reason(
         news_value, breaking_urgency, audience_interest,
@@ -462,6 +479,7 @@ def score_story(story: Story) -> EditorialScore:
     reason += f" | Verification {verification_value} {verification_score:.0f}/100 (separate gate)"
     if impact_reasons:
         reason += f" | Impact {impact_score:.0f}/20: {', '.join(impact_reasons)}"
+    reason += f" | Keyword-reduced shadow {shadow_total:.1f}/100 [{shadow_tier.value}]"
     region = getattr(story, "region", "global")
     if region != "global":
         reason += f" | Region {region}"
@@ -482,6 +500,8 @@ def score_story(story: Story) -> EditorialScore:
         tier_was_overridden  = (override == 1),
         impact_score         = impact_score,
         impact_reasons       = impact_reasons,
+        shadow_total         = shadow_total,
+        shadow_tier          = shadow_tier,
     )
 
     _log_score(score)
@@ -635,6 +655,78 @@ def _score_audience_interest(text: str, title: str) -> float:
     return min(score, 20.0)
 
 
+def _keyword_reduced_shadow_total(
+    *,
+    story: Story,
+    text: str,
+    title: str,
+    source_credibility: float,
+    freshness: float,
+    visual_potential: float,
+    impact_score: float,
+) -> float:
+    """Evaluate lower keyword authority without changing live routing."""
+    if any(re.search(pattern, text, re.IGNORECASE) for pattern in _LOW_VALUE_PATTERNS):
+        news_value = 2.0
+    elif any(re.search(pattern, title, re.IGNORECASE) for pattern in _OPINION_PATTERNS):
+        news_value = 8.0
+    else:
+        news_hits = sum(1 for pattern in _HIGH_NEWS_VALUE if re.search(pattern, text, re.IGNORECASE))
+        news_value = 12.0 + min(news_hits * 2.0, 8.0)
+        if len(text) > 200:
+            news_value += 4.0
+        news_value = min(news_value, 24.0)
+
+    best_breaking = max(
+        (points for pattern, points in _BREAKING_SIGNALS if re.search(pattern, text, re.IGNORECASE)),
+        default=0,
+    )
+    breaking_urgency = 6.0 + min(best_breaking * 0.35, 6.0)
+    corroboration_count = len(story.corroborating_sources or [])
+    if best_breaking and corroboration_count >= 2:
+        breaking_urgency += 2.0
+    elif best_breaking and corroboration_count >= 1:
+        breaking_urgency += 1.0
+    breaking_urgency = min(breaking_urgency, 14.0)
+
+    interest_hits = sum(1 for pattern in _INTEREST_TOPICS if re.search(pattern, text, re.IGNORECASE))
+    audience_interest = 7.0 + min(interest_hits * 1.5, 6.0)
+    global_hits = sum(1 for pattern in _GLOBAL_REACH if re.search(pattern, text, re.IGNORECASE))
+    audience_interest += min(global_hits * 1.5, 3.0)
+    if any(re.search(pattern, title, re.IGNORECASE) for pattern in _ENGAGEMENT_TITLE_SIGNALS):
+        audience_interest += 1.0
+    audience_interest = min(audience_interest, 17.0)
+
+    category = getattr(story, "category", "breaking")
+    tier_num = CATEGORY_TIERS.get(category, 2)
+    multiplier = _CATEGORY_MULTIPLIERS.get(category, 1.0)
+    # Only the structured societal-impact detector can promote a category in
+    # the proposed model; generic urgency words cannot do so by themselves.
+    if impact_score >= 10 and tier_num > 1:
+        tier_num = 1
+        multiplier = 1.12
+
+    raw_total = (
+        news_value + breaking_urgency + audience_interest
+        + source_credibility + freshness + visual_potential
+    )
+    if tier_num == 1:
+        raw_total = min(raw_total + _TIER1_FLOOR_BOOST, 100.0)
+    proposed = raw_total * multiplier
+    if tier_num == 3:
+        proposed = min(proposed, _TIER3_SCORE_CAP)
+
+    source_tier_num = int(getattr(story, "source_tier", 4) or 4)
+    if source_tier_num <= 3:
+        if impact_score >= 15:
+            proposed = max(proposed, 90.0)
+        elif impact_score >= 10:
+            proposed = max(proposed, 82.0)
+        elif impact_score >= 5:
+            proposed = max(proposed, 72.0)
+    return round(min(proposed, 100.0), 1)
+
+
 def _score_source_credibility(story: Story) -> float:
     """
     Source credibility (0–15).
@@ -748,4 +840,14 @@ def _log_score(s: EditorialScore) -> None:
         EditorialTier.REJECT:   "⚫",
     }[s.tier]
     logger.info("%s [%5.1f] %-22s %s", icon, s.total, s.tier.value, s.story_title[:65])
+    logger.info(
+        "SCORER SHADOW current=%.1f/%s proposed=%.1f/%s delta=%+.1f impact=%.0f | %s",
+        s.total,
+        s.tier.value,
+        s.shadow_total,
+        s.shadow_tier.value,
+        s.shadow_total - s.total,
+        s.impact_score,
+        s.story_title[:65],
+    )
     logger.debug("         %s", s.reason)

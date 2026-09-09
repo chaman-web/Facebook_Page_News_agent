@@ -45,3 +45,18 @@ def test_routine_soft_story_does_not_receive_impact_floor():
     assert assess_high_impact(f"{story.title} {story.raw_summary}")[0] == 0
     assert score.impact_score == 0
     assert score.effective_tier_num == 3
+
+
+def test_shadow_reduces_keyword_authority_without_losing_high_impact_floor():
+    story = _story(
+        "Breaking urgent war attack missile crisis",
+        "A missile strike left 120 people killed during a conflict escalation.",
+        category="technology",
+    )
+
+    score = score_story(story)
+
+    assert score.shadow_total <= score.total
+    assert score.impact_score >= 10
+    assert score.shadow_total >= 82
+    assert score.shadow_tier in {EditorialTier.HIGH, EditorialTier.PRIORITY}

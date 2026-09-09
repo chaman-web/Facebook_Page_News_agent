@@ -15,6 +15,43 @@ def test_routing_is_immediate_moderate_or_reject():
     assert route_story(79.9, 1) == Route.SCHEDULE
     assert route_story(60, 3) == Route.SCHEDULE
     assert route_story(59.9, 1) == Route.REJECT
+    assert route_story(65, 3, impact_score=10) == Route.PUBLISH_NOW
+
+
+def test_high_impact_metadata_survives_retry_queue(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    story = Story(
+        title="Major emergency affects millions",
+        source_name="Reuters",
+        source_url="https://reuters.com/high-impact",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="A verified emergency affects millions of people.",
+        source_tier=1,
+        verification_status=VerificationStatus.VERIFIED,
+        verification_score=90,
+    )
+
+    with (
+        patch("pipeline.posting_queue.QUEUE_FILE", queue_path),
+        patch("pipeline.posting_queue.AUDIT_FILE", audit_path),
+    ):
+        queue = PostingQueue()
+        queue.add(
+            story,
+            score=68,
+            effective_tier=1,
+            impact_score=10,
+            impact_reasons=["population-policy", "critical-infrastructure"],
+        )
+
+        reloaded = PostingQueue()
+        entry = reloaded._entries[0]
+        assert entry.route == Route.PUBLISH_NOW.value
+        assert entry.is_breaking is True
+        assert entry.impact_score == 10
+        assert entry.impact_reasons == ["population-policy", "critical-infrastructure"]
+        assert entry.routing_reason == "impact score >= 10"
 
 
 def test_expire_stale_persists_all_required_downgrades(tmp_path):

@@ -558,6 +558,8 @@ def fetch_and_build(
                 queue.record_direct_publish(
                     story, escore.total, escore.effective_tier_num,
                     Path(image_path), post_id,
+                    impact_score=escore.impact_score,
+                    impact_reasons=list(escore.impact_reasons),
                 )
                 record_published_title(story.title)
                 mark_seen(story, permanent=True)
@@ -575,6 +577,8 @@ def fetch_and_build(
                     post_content=story.post_content,
                     card_headline=story.card_headline,
                     hashtags=story.hashtags,
+                    impact_score=escore.impact_score,
+                    impact_reasons=list(escore.impact_reasons),
                 )
                 direct_failed += 1
 
@@ -587,6 +591,8 @@ def fetch_and_build(
             post_content   = getattr(story, "post_content", None),
             card_headline  = getattr(story, "card_headline", None),
             hashtags       = getattr(story, "hashtags", None),
+            impact_score   = escore.impact_score,
+            impact_reasons = list(escore.impact_reasons),
         )
         resolve(story.source_url)
         added += 1

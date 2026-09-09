@@ -9,12 +9,12 @@ Publishing philosophy:
   ROUTING LANES  (assigned at queue-entry time via route_story)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-  🚨 PUBLISH_NOW   score ≥ 80
+  🚨 PUBLISH_NOW   score ≥ 80 or impact score ≥ 10
      Bypass interval, dead-hours, fatigue. Publish immediately.
      TTL: 2 hours. After that, downgrades to NEXT_SLOT.
      Token-bucket: minimum 10-min gap between two PUBLISH_NOW posts.
 
-  📅 SCHEDULE      score 60–79
+  📅 SCHEDULE      score 60–79.9 when impact score < 10
      Holds for the next scheduled window (00:00 / 13:00 / 18:00 local).
      Only the highest-scoring SCHEDULE story publishes per window slot.
      TTL: 12 hours.
@@ -82,13 +82,12 @@ WINDOW_TOLERANCE_MINUTES = 15
 # ---------------------------------------------------------------------------
 
 SCORE_PUBLISH_NOW = 80.0
-SCORE_NEXT_SLOT   = 75.0
+SCORE_NEXT_SLOT   = 75.0  # Legacy TTL/minimum-floor support; not assigned to new entries.
 SCORE_SCHEDULE    = 60.0
-SCORE_HOLD        = 50.0
-# < SCORE_HOLD → REJECT
+SCORE_HOLD        = 50.0  # Legacy HOLD support; new entries below 60 are rejected.
 
-TIER1_PUBLISH_NOW = 85.0   # Tier 1 earns PUBLISH_NOW at this score
-TIER1_NEXT_SLOT   = 60.0   # Tier 1 earns NEXT_SLOT at this score
+TIER1_PUBLISH_NOW = 85.0   # Backwards-compatible alias; new routing uses 80.
+TIER1_NEXT_SLOT   = 60.0   # Backwards-compatible alias; new entries use SCHEDULE.
 
 # Intervals
 PUBLISH_NOW_MIN_GAP = timedelta(minutes=10)   # Feature #5 — token bucket
@@ -165,13 +164,13 @@ class Route(str, Enum):
         }[self]
 
 
-def route_story(score: float, tier: int) -> Route:
+def route_story(score: float, tier: int, impact_score: float = 0.0) -> Route:
     """
     Single point of truth for routing. Called once at queue-entry time.
 
     New-entry score thresholds:
-        ≥ 80    PUBLISH_NOW
-        60–79   SCHEDULE
+        impact ≥ 10 or score ≥ 80  PUBLISH_NOW
+        score 60–79.9              SCHEDULE
         < 60    REJECT
 
     ``tier`` is retained for API compatibility. Existing NEXT_SLOT and HOLD
@@ -179,7 +178,8 @@ def route_story(score: float, tier: int) -> Route:
     """
     # Simple editorial routing: high value goes now, moderate waits for the
     # next scheduled window, low value never enters the queue.
-    if score >= SCORE_PUBLISH_NOW:        return Route.PUBLISH_NOW
+    if impact_score >= 10 or score >= SCORE_PUBLISH_NOW:
+        return Route.PUBLISH_NOW
     if score >= SCORE_SCHEDULE:           return Route.SCHEDULE
     return Route.REJECT
 
@@ -220,6 +220,9 @@ class QueueEntry:
     verification_status: str       = VerificationStatus.UNVERIFIED.value
     verification_score: float      = 0.0
     verification_reason: str       = ""
+    impact_score:       float       = 0.0
+    impact_reasons:     Optional[list] = None
+    routing_reason:     str         = ""
     facebook_post_id: Optional[str] = None
 
     @property
@@ -261,6 +264,8 @@ class PostingQueue:
         post_content: Optional[str] = None,
         card_headline: Optional[str] = None,
         hashtags: Optional[list] = None,
+        impact_score: float = 0.0,
+        impact_reasons: Optional[list] = None,
     ) -> None:
         """Route and enqueue a story. Silently ignores duplicates."""
         # 1. Exact URL already in queue
@@ -275,7 +280,14 @@ class PostingQueue:
 
         cat      = getattr(story, "category", "breaking")
         tier_num = effective_tier if effective_tier is not None else CATEGORY_TIERS.get(cat, 2)
-        lane     = route_story(score, tier_num)
+        lane     = route_story(score, tier_num, impact_score)
+        routing_reason = (
+            "impact score >= 10"
+            if impact_score >= 10
+            else "editorial score >= 80"
+            if score >= SCORE_PUBLISH_NOW
+            else "editorial score >= 60"
+        )
 
         if lane == Route.REJECT:
             self._audit(story.title, score, tier_num, lane, "REJECT", "Score below reject floor")
@@ -299,6 +311,9 @@ class PostingQueue:
             verification_status = story.verification_status.value,
             verification_score  = float(story.verification_score or 0.0),
             verification_reason = story.verification_reason or "",
+            impact_score = float(impact_score or 0.0),
+            impact_reasons = list(impact_reasons or []),
+            routing_reason = routing_reason,
             status = (
                 "QUEUED"
                 if story.verification_status == VerificationStatus.VERIFIED
@@ -309,7 +324,7 @@ class PostingQueue:
         self._save()
         action = "QUEUED" if entry.status == "QUEUED" else "REVIEW_REQUIRED"
         detail = (
-            f"Routed to {lane.value}"
+            f"Routed to {lane.value}: {routing_reason}"
             if entry.status == "QUEUED"
             else story.verification_reason or "Independent verification required"
         )
@@ -510,6 +525,8 @@ class PostingQueue:
         effective_tier: int,
         image_path: Path,
         post_id: str,
+        impact_score: float = 0.0,
+        impact_reasons: Optional[list] = None,
     ) -> None:
         """Record an immediate post as history without first queueing it."""
         entry = next(
@@ -534,6 +551,11 @@ class PostingQueue:
                 verification_status=story.verification_status.value,
                 verification_score=float(story.verification_score or 0.0),
                 verification_reason=story.verification_reason or "",
+                impact_score=float(impact_score or 0.0),
+                impact_reasons=list(impact_reasons or []),
+                routing_reason=(
+                    "impact score >= 10" if impact_score >= 10 else "editorial score >= 80"
+                ),
             )
             self._entries.append(entry)
         self.mark_published(entry, post_id=post_id)
@@ -997,6 +1019,9 @@ class PostingQueue:
                 e.setdefault("hashtags",         None)
                 e.setdefault("verification_status", VerificationStatus.UNVERIFIED.value)
                 e.setdefault("verification_score",  0.0)
+                e.setdefault("impact_score",        0.0)
+                e.setdefault("impact_reasons",      [])
+                e.setdefault("routing_reason",      "legacy queue entry")
                 e.setdefault(
                     "verification_reason",
                     "Legacy queue entry has no independent-source verification evidence.",
