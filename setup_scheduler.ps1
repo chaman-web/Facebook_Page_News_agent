@@ -37,11 +37,14 @@ Register-ScheduledTask `
 
 Write-Host "OK Job 1 registered - every 4 hours"
 
-# --- Job 2: Publish — inspect the two-tier queue every 10 minutes ---
+# --- Job 2: Publish — enabled only while verified queue work exists ---
 $action2 = New-ScheduledTaskAction `
     -Execute (Join-Path $projectDir "run_job2_publish.bat") `
     -WorkingDirectory $projectDir
 
+# This trigger is a recovery fallback while the task is enabled. The task
+# disables itself as soon as both verified tiers are empty. Job 1 re-enables
+# and starts it only after verified work enters the queue.
 $trigger2 = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddMinutes(1) `
@@ -64,7 +67,7 @@ Register-ScheduledTask `
     -Force `
     -ErrorAction Stop
 
-Write-Host "OK Job 2 registered - every 10 minutes"
+Write-Host "OK Job 2 registered - self-disables while verified queue is empty"
 
 # Remove the temporary per-user task used when the existing elevated task
 # could not be updated without an administrator session.
