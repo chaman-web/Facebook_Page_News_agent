@@ -375,6 +375,9 @@ class PostingQueue:
                 return False, f"Tier 1 cooldown — {max(1, int(remaining.total_seconds() / 60))}m remaining"
             return True, f"Tier 1 publish now [{entry.score:.1f}]"
 
+        if self.has_actionable_tier1(now):
+            return False, "Tier 1 priority — waiting for eligible high-impact stories"
+
         if entry.score < SCORE_SCHEDULE:
             return False, f"Score {entry.score:.1f} is below Tier 2 floor {SCORE_SCHEDULE:.0f}"
         if self.tier2_published_count() >= TIER2_DAILY_LIMIT:
@@ -387,6 +390,31 @@ class PostingQueue:
         if not self._is_top_schedule_story(entry):
             return False, "Waiting behind a higher-scoring Tier 2 story"
         return True, f"Tier 2 next slot [{entry.score:.1f}]"
+
+    def has_actionable_tier1(self, now: Optional[datetime] = None) -> bool:
+        """Return whether a fresh Tier 1 entry is ready for this worker run."""
+        now = now or datetime.now(timezone.utc)
+        ttl = LANE_TTL[Route.PUBLISH_NOW.value]
+        for candidate in self._entries:
+            if candidate.status != "QUEUED" or candidate.route_enum != Route.PUBLISH_NOW:
+                continue
+            try:
+                if candidate.age(now) > ttl:
+                    continue
+            except (TypeError, ValueError):
+                # Invalid legacy timestamps require normal publisher review;
+                # do not allow Tier 2 to jump ahead of them.
+                return True
+            if candidate.next_retry_at:
+                try:
+                    if datetime.fromisoformat(candidate.next_retry_at) > now:
+                        continue
+                except ValueError:
+                    # A malformed retry timestamp must not silently remove a
+                    # high-impact story from priority handling.
+                    return True
+            return True
+        return False
 
     def next_publishable(
         self,

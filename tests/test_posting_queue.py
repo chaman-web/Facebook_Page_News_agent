@@ -252,6 +252,134 @@ def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):
         assert queue.deserves_publishing(breaking, now - timedelta(minutes=5))[0] is False
 
 
+def test_tier1_blocks_tier2_until_high_impact_lane_is_clear(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        tier1 = QueueEntry(
+            "Urgent", "A", "https://a.test/urgent", "world", 88, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, impact_score=12,
+        )
+        tier2 = QueueEntry("Scheduled", "B", "https://b.test/scheduled", "world", 78, now.isoformat())
+        queue._entries = [tier2, tier1]
+
+        assert queue.deserves_publishing(tier2, None) == (
+            False,
+            "Tier 1 priority — waiting for eligible high-impact stories",
+        )
+        assert queue.next_publishable(None) is tier1
+
+
+def test_tier1_retry_backoff_does_not_freeze_tier2(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        tier1 = QueueEntry(
+            "Retrying urgent", "A", "https://a.test/retry", "world", 90, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, impact_score=12,
+        )
+        tier2 = QueueEntry("Scheduled", "B", "https://b.test/scheduled", "world", 77, now.isoformat())
+        queue._entries = [tier1, tier2]
+        queue.mark_retry(tier1, "temporary Facebook failure")
+
+        assert queue.has_actionable_tier1(now) is False
+        assert queue.deserves_publishing(tier2, None)[0] is True
+
+
+def test_review_required_tier1_does_not_block_tier2(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        tier1 = QueueEntry(
+            "Review urgent", "A", "https://a.test/review", "world", 91, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, status="REVIEW_REQUIRED",
+        )
+        tier2 = QueueEntry("Scheduled", "B", "https://b.test/scheduled", "world", 76, now.isoformat())
+        queue._entries = [tier1, tier2]
+
+        assert queue.has_actionable_tier1(now) is False
+        assert queue.deserves_publishing(tier2, None)[0] is True
+
+
+def test_second_ready_tier1_keeps_tier2_blocked_when_first_is_backing_off(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        retrying = QueueEntry(
+            "Retrying", "A", "https://a.test/retry", "world", 95, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, impact_score=13,
+        )
+        ready = QueueEntry(
+            "Ready", "B", "https://b.test/ready", "world", 84, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, impact_score=11,
+        )
+        tier2 = QueueEntry("Scheduled", "C", "https://c.test/scheduled", "world", 79, now.isoformat())
+        queue._entries = [retrying, ready, tier2]
+        queue.mark_retry(retrying, "temporary Facebook failure")
+
+        assert queue.has_actionable_tier1(now) is True
+        assert queue.next_publishable(None) is ready
+        assert queue.deserves_publishing(tier2, None)[0] is False
+
+
+def test_tier2_starts_after_tier1_is_completed(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        completed = QueueEntry(
+            "Completed urgent", "A", "https://a.test/completed", "world", 88, now.isoformat(),
+            route=Route.PUBLISH_NOW.value, status="PUBLISHED",
+            published_at=(now - timedelta(minutes=31)).isoformat(),
+        )
+        tier2 = QueueEntry("Scheduled", "B", "https://b.test/scheduled", "world", 78, now.isoformat())
+        queue._entries = [completed, tier2]
+
+        assert queue.has_actionable_tier1(now) is False
+        assert queue.deserves_publishing(tier2, now - timedelta(minutes=31))[0] is True
+
+
+def test_stale_tier1_does_not_starve_fresh_tier2(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        stale = QueueEntry(
+            "Stale urgent", "A", "https://a.test/stale", "world", 90,
+            (now - timedelta(hours=49)).isoformat(), route=Route.PUBLISH_NOW.value,
+        )
+        tier2 = QueueEntry("Fresh scheduled", "B", "https://b.test/fresh", "world", 77, now.isoformat())
+        queue._entries = [stale, tier2]
+
+        assert queue.has_actionable_tier1(now) is False
+        assert queue.deserves_publishing(tier2, None)[0] is True
+
+
+def test_tier2_obeys_thirty_minute_gap_after_tier1_lane_clears(tmp_path):
+    queue_path = tmp_path / "posting_queue.json"
+    audit_path = tmp_path / "posting_decisions.jsonl"
+    now = datetime.now(timezone.utc)
+    with patch("pipeline.posting_queue.QUEUE_FILE", queue_path), patch("pipeline.posting_queue.AUDIT_FILE", audit_path):
+        queue = PostingQueue()
+        tier2 = QueueEntry("Scheduled", "B", "https://b.test/scheduled", "world", 78, now.isoformat())
+        queue._entries = [tier2]
+
+        ok, reason = queue.deserves_publishing(tier2, now - timedelta(minutes=29))
+        assert ok is False
+        assert "Tier 2 interval" in reason
+        assert queue.deserves_publishing(tier2, now - timedelta(minutes=31))[0] is True
+
+
 def test_tier2_failure_backoff_does_not_block_next_ranked_story(tmp_path):
     queue_path = tmp_path / "posting_queue.json"
     audit_path = tmp_path / "posting_decisions.jsonl"
