@@ -185,6 +185,27 @@ def test_batch_dedup_blocks_same_story_from_two_sources(tmp_path):
     assert duplicates == 1
 
 
+def test_batch_dedup_reports_exact_reason_to_optional_audit_callback(tmp_path):
+    seen_path = _write_seen(
+        tmp_path,
+        {"urls": [], "titles": [], "url_attempts": {}, "title_attempts": {}},
+    )
+    stories = [
+        _story("Major earthquake strikes coastal region", "https://one.example/report"),
+        _story("Major earthquake strikes coastal region", "https://two.example/report"),
+    ]
+    audited: list[tuple[str, str]] = []
+
+    with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+        filter_fresh_stories(
+            stories,
+            on_duplicate=lambda story, reason: audited.append((story.source_url, reason)),
+        )
+
+    assert audited[0][0] == "https://two.example/report"
+    assert "Duplicate within current fetch" in audited[0][1]
+
+
 def test_batch_dedup_blocks_tracking_variant_with_different_title(tmp_path):
     seen_path = _write_seen(
         tmp_path,

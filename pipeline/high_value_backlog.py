@@ -10,9 +10,20 @@ import config
 from models import Story
 
 
-def remember(story: Story, score: float, impact_score: float) -> None:
+def remember(
+    story: Story,
+    score: float,
+    impact_score: float,
+    *,
+    stage: str = "scored",
+    reason: str = "High-impact candidate awaiting completion.",
+    impact_reasons: tuple[str, ...] | list[str] = (),
+) -> None:
+    """Protect a candidate and retain its latest pipeline stopping point."""
     data = _load()
     story.priority_protected = True
+    now = datetime.now(timezone.utc).isoformat()
+    existing = data.get(story.source_url, {})
     data[story.source_url] = {
         "title": story.title,
         "source_name": story.source_name,
@@ -21,9 +32,13 @@ def remember(story: Story, score: float, impact_score: float) -> None:
         "raw_summary": story.raw_summary,
         "category": story.category,
         "region": story.region,
-        "score": score,
-        "impact_score": impact_score,
-        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "score": max(float(existing.get("score", 0.0) or 0.0), score),
+        "impact_score": max(float(existing.get("impact_score", 0.0) or 0.0), impact_score),
+        "impact_reasons": list(impact_reasons or existing.get("impact_reasons", [])),
+        "last_stage": stage,
+        "last_reason": reason,
+        "saved_at": existing.get("saved_at", now),
+        "last_checked_at": now,
     }
     _save(data)
 

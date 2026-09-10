@@ -78,7 +78,12 @@ from output.draft_writer import save_draft
 from pipeline.content_validator import ContentValidationError, validate_post
 from pipeline.deduplicator import check_published_duplicate, filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
-from pipeline.editorial_scorer import EditorialTier, score_and_filter, score_story
+from pipeline.editorial_scorer import (
+    EditorialTier,
+    assess_high_impact,
+    score_and_filter,
+    score_story,
+)
 from pipeline.final_quality_check import FinalQualityError, final_quality_check, remember_post
 from pipeline.generator import generate_post, reset_generation_backend_state
 from pipeline.high_value_backlog import pending_stories, remember, resolve
@@ -148,15 +153,16 @@ def _select_verified_and_provisional(items: list, per_lane: int) -> list:
 
 
 def _preserve_high_impact(scored: list, selected: list) -> list:
-    """Keep every consequential update even when a category quota is full."""
+    """Keep every Tier 1 candidate even when a provisional quota is full."""
     selected_urls = {item[1].source_url for item in selected}
     protected = [
         item for item in scored
-        if item[0].impact_score >= 10 and item[1].source_url not in selected_urls
+        if (item[0].total >= 80 or item[0].impact_score >= 10)
+        and item[1].source_url not in selected_urls
     ]
     if protected:
         logger.info(
-            "Impact protection retained %d additional high-impact candidate(s).",
+            "Tier 1 protection retained %d additional priority candidate(s).",
             len(protected),
         )
     return selected + protected
@@ -199,10 +205,58 @@ def fetch_and_build(
         "high_impact_protected": 0,
         "high_impact_build_failures": 0,
         "high_impact_missed": 0,
+        "high_impact_rescue_updates": 0,
         "regional_candidates_protected": 0,
     }
     high_impact_urls: set[str] = set()
     accounted_high_impact_urls: set[str] = set()
+
+    def protect_for_rescue(
+        story: Story,
+        stage: str,
+        reason: str,
+        *,
+        score: float = 0.0,
+        impact_score: float | None = None,
+        impact_reasons: tuple[str, ...] = (),
+        force: bool = False,
+    ) -> bool:
+        """Record a stopping point while preserving every existing gate."""
+        if impact_score is None:
+            impact_score, impact_reasons = assess_high_impact(
+                f"{story.title} {story.raw_summary}"
+            )
+        regional_impact = assess_regional_impact(story)
+        qualifies = force or impact_score >= 10 or regional_impact.is_major
+        if not qualifies and story.source_url not in high_impact_urls:
+            return False
+        if regional_impact.is_major:
+            impact_score = max(impact_score, 10.0)
+            impact_reasons = tuple(dict.fromkeys(
+                impact_reasons
+                + tuple(f"regional-{item}" for item in regional_impact.reasons)
+            ))
+        high_impact_urls.add(story.source_url)
+        story.priority_protected = True
+        if not dry_run:
+            remember(
+                story,
+                score,
+                impact_score,
+                stage=stage,
+                reason=reason,
+                impact_reasons=impact_reasons,
+            )
+        metrics["high_impact_rescue_updates"] += 1
+        log_rescue = logger.info if stage in {"discovered", "scored"} else logger.warning
+        log_rescue(
+            "HIGH-VALUE/IMPACT RESCUE [%s | %.0f]: %s | %s",
+            stage,
+            impact_score,
+            story.title[:70],
+            reason,
+        )
+        return True
 
     def finish(status: str, result: int) -> int:
         if high_impact_urls:
@@ -243,6 +297,7 @@ def fetch_and_build(
 
     pending = pending_stories()
     if pending:
+        high_impact_urls.update(story.source_url for story in pending)
         raw_urls = {story.source_url for story in raw_stories}
         raw_stories.extend(story for story in pending if story.source_url not in raw_urls)
         logger.info("Restored %d protected high-value candidate(s).", len(pending))
@@ -272,13 +327,32 @@ def fetch_and_build(
         sum(getattr(s, "cluster_size", 1) for s in clustered_stories) / max(len(clustered_stories), 1),
     )
 
+    for story in clustered_stories:
+        protect_for_rescue(
+            story,
+            "discovered",
+            "High-impact candidate entered the normal pipeline.",
+        )
+
     # ==========================================================================
     # STAGE 2 — REMOVE DUPLICATES
     # ==========================================================================
     logger.info("── STAGE 2: Remove Duplicates ──────────────────")
+    def audit_duplicate(story: Story, reason: str) -> None:
+        if story.source_url not in high_impact_urls:
+            return
+        if reason.startswith(("Duplicate URL:", "Duplicate URL within current fetch:")):
+            accounted_high_impact_urls.add(story.source_url)
+            if not dry_run:
+                resolve(story.source_url)
+            logger.info("High-impact candidate is a confirmed URL duplicate: %s", story.title[:70])
+            return
+        protect_for_rescue(story, "duplicate_filter", reason)
+
     fresh_stories, dup_count = filter_fresh_stories(
         clustered_stories,
         record_attempts=not dry_run,
+        on_duplicate=audit_duplicate,
     )
     logger.info("%d fresh stories after deduplication (%d duplicates removed).", len(fresh_stories), dup_count)
     metrics["duplicates"] = dup_count
@@ -300,11 +374,10 @@ def fetch_and_build(
         elif verdict.decision == DNPDecision.HOLD:
             dnp_held.append((story, verdict.reason))
             regional_impact = assess_regional_impact(story)
+            if protect_for_rescue(story, "content_hold", verdict.reason):
+                if regional_impact.is_major:
+                    metrics["regional_candidates_protected"] += 1
             if regional_impact.is_major:
-                story.priority_protected = True
-                if not dry_run:
-                    remember(story, 0.0, 10.0)
-                metrics["regional_candidates_protected"] += 1
                 logger.info(
                     "Regional candidate protected for recheck [%.0f/10]: %s | %s",
                     regional_impact.score,
@@ -313,6 +386,7 @@ def fetch_and_build(
                 )
         else:
             dnp_rejected += 1
+            protect_for_rescue(story, "content_reject", verdict.reason)
     logger.info("DNP gate: %d passed | %d held | %d rejected.", len(dnp_passed), len(dnp_held), dnp_rejected)
     metrics["policy_rejected"] = dnp_rejected
     if not dnp_passed:
@@ -332,6 +406,7 @@ def fetch_and_build(
             verification_candidates.append(story)
         except StoryRejected as exc:
             logger.debug("Rejected: %s", exc.reason)
+            protect_for_rescue(story, "verification", exc.reason)
             rejected_count += 1
     verified_count = sum(
         1 for story in verification_candidates
@@ -380,12 +455,33 @@ def fetch_and_build(
     if not scored:
         logger.warning("All stories scored below 65. Nothing to queue.")
         metrics["scoring_rejected"] = len(verification_candidates)
+        for story in verification_candidates:
+            protect_for_rescue(
+                story,
+                "editorial_scoring",
+                "Editorial score remained below the 65-point queue threshold.",
+            )
         return finish("empty", 0)
     metrics["scoring_rejected"] = max(0, len(verification_candidates) - len(scored))
+    scored_urls = {story.source_url for _, story in scored}
+    for story in verification_candidates:
+        if story.source_url not in scored_urls:
+            protect_for_rescue(
+                story,
+                "editorial_scoring",
+                "Editorial score remained below the 65-point queue threshold.",
+            )
     for escore, story in scored:
         if escore.total >= 80 or escore.impact_score >= 10:
-            high_impact_urls.add(story.source_url)
-            remember(story, escore.total, escore.impact_score)
+            protect_for_rescue(
+                story,
+                "scored",
+                "Candidate qualified for Tier 1 processing.",
+                score=escore.total,
+                impact_score=escore.impact_score,
+                impact_reasons=escore.impact_reasons,
+                force=True,
+            )
     metrics["high_impact_protected"] = len(high_impact_urls)
     logger.info(
         "Score distribution: %s",
@@ -452,6 +548,7 @@ def fetch_and_build(
                 story = verify_story(story, deep=True)
             except StoryRejected as exc:
                 logger.warning("Deep verification rejected '%s': %s", story.title[:50], exc.reason)
+                protect_for_rescue(story, "deep_verification", exc.reason)
                 story.draft_status = DraftStatus.REJECTED
                 story.rejection_reason = exc.reason
                 save_draft(story)
@@ -464,6 +561,7 @@ def fetch_and_build(
                 logger.error("Post generation failed for '%s': %s", story.title[:50], exc)
                 is_high_impact = story.source_url in high_impact_urls
                 if is_high_impact:
+                    protect_for_rescue(story, "post_generation", str(exc))
                     metrics["high_impact_build_failures"] += 1
                     story.draft_status = DraftStatus.DRAFT
                     story.rejection_reason = f"Build deferred: {exc}"
@@ -479,6 +577,7 @@ def fetch_and_build(
                 story = validate_post(story)
             except ContentValidationError as exc:
                 logger.warning("Content validation failed for '%s': %s", story.title[:50], exc)
+                protect_for_rescue(story, "content_validation", str(exc))
                 story.draft_status = DraftStatus.REJECTED
                 story.rejection_reason = str(exc)
                 save_draft(story)
@@ -487,6 +586,15 @@ def fetch_and_build(
             # Preserve powerful single-source stories as reviewable drafts, but
             # never place them in the automatic Facebook publishing queue.
             if story.verification_status != VerificationStatus.VERIFIED:
+                protect_for_rescue(
+                    story,
+                    "awaiting_corroboration",
+                    story.verification_reason or "Independent corroboration is still required.",
+                    score=escore.total,
+                    impact_score=escore.impact_score,
+                    impact_reasons=escore.impact_reasons,
+                    force=story.source_url in high_impact_urls,
+                )
                 story.draft_status = DraftStatus.DRAFT
                 story.rejection_reason = None
                 save_draft(story)
@@ -520,6 +628,11 @@ def fetch_and_build(
                     logger.error("Branded fallback image failed: %s", fallback_exc)
 
         if not dry_run and not image_path:
+            protect_for_rescue(
+                story,
+                "image_card",
+                "Image card creation failed; candidate retained for retry.",
+            )
             story.draft_status = DraftStatus.DRAFT
             story.rejection_reason = "A relevant image card is required before publishing."
             save_draft(story)
@@ -550,6 +663,7 @@ def fetch_and_build(
             final_dnp = check_do_not_publish(story, editorial_score=escore.total, image_query=story.title if image_path else None)
             if final_dnp.decision == DNPDecision.REJECT:
                 logger.warning("⛔ Late DNP REJECT [%s]: %s", final_dnp.check_name, final_dnp.reason)
+                protect_for_rescue(story, "final_content_gate", final_dnp.reason)
                 story.draft_status = DraftStatus.REJECTED
                 story.rejection_reason = final_dnp.reason
                 save_draft(story)
@@ -560,6 +674,7 @@ def fetch_and_build(
             policy_verdict = evaluate_meta_policy(story, image_path=image_path)
             apply_policy_verdict(story, policy_verdict)
             if policy_verdict.decision == PolicyDecision.BLOCK:
+                protect_for_rescue(story, "facebook_policy_block", policy_verdict.reason)
                 story.draft_status = DraftStatus.POLICY_REVIEW
                 story.rejection_reason = None
                 save_draft(story)
@@ -570,6 +685,7 @@ def fetch_and_build(
                 logger.warning("⛔ Meta policy block saved for review: %s | %s", story.title[:60], policy_verdict.reason)
                 continue
             if policy_verdict.decision == PolicyDecision.REVIEW:
+                protect_for_rescue(story, "facebook_policy_review", policy_verdict.reason)
                 story.draft_status = DraftStatus.POLICY_REVIEW
                 story.rejection_reason = None
                 save_draft(story)
@@ -585,6 +701,7 @@ def fetch_and_build(
                 final_quality_check(story, image_path=image_path)
             except FinalQualityError as exc:
                 logger.warning("Final quality check failed for '%s': %s", story.title[:50], exc)
+                protect_for_rescue(story, "final_quality", str(exc))
                 story.draft_status = DraftStatus.REJECTED
                 story.rejection_reason = str(exc)
                 save_draft(story)
@@ -698,6 +815,7 @@ def fetch_and_build(
                 # Preserve the story for an automatic retry if Facebook is
                 # temporarily unavailable; normal high-value flow never waits.
                 logger.error("Immediate publish failed; queued for retry: %s", exc)
+                protect_for_rescue(story, "facebook_publish_retry", str(exc))
                 queue.add(
                     story, escore.total,
                     effective_tier=escore.effective_tier_num,
@@ -1003,6 +1121,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
         except DuplicateStory as exc:
             logger.warning("Duplicate delivery prevented before Facebook: %s | %s", entry.title[:60], exc)
             queue.mark_skipped(entry, f"duplicate delivery prevented: {exc}")
+            resolve(entry.source_url)
             metrics["duplicates_prevented"] = metrics.get("duplicates_prevented", 0) + 1
             continue
 
@@ -1034,6 +1153,7 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             remember_post(story.post_content)
             record_published_title(entry.title)
             mark_seen(story, permanent=True)
+            resolve(entry.source_url)
             last_published_at = datetime.now(timezone.utc)
             if entry.is_breaking:
                 last_breaking_at = last_published_at

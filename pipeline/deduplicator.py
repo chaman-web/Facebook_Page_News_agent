@@ -23,6 +23,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import config
@@ -102,7 +103,9 @@ def check_duplicate(story: Story) -> None:
 
 
 def filter_fresh_stories(
-    stories: list[Story], record_attempts: bool = True
+    stories: list[Story],
+    record_attempts: bool = True,
+    on_duplicate: Callable[[Story, str], None] | None = None,
 ) -> tuple[list[Story], int]:
     """Check and record a pipeline batch with one file read and one file write."""
     seen = _load_seen()
@@ -129,8 +132,10 @@ def filter_fresh_stories(
                         f"Duplicate within current fetch ({ratio:.0%} title match): "
                         f"'{story.title}' ≈ '{prior_title}'"
                     )
-        except DuplicateStory:
+        except DuplicateStory as exc:
             duplicate_count += 1
+            if on_duplicate is not None:
+                on_duplicate(story, exc.reason)
             continue
         fresh.append(story)
         batch_urls.add(story_url)
