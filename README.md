@@ -95,7 +95,7 @@ Verification and editorial importance are separate decisions:
 - Sensitive real-world stories do not use synthetic event imagery.
 - Generic engagement prompts are removed; a story-specific question is optional.
 - Every new caption opens with a grounded `Why this matters:` explanation.
-- Multiple immediate high-impact posts are separated by ten minutes after the first post.
+- All Facebook posts are separated by at least thirty minutes; Tier 1 remains first in line.
 - Publish preflight checks `pages_manage_posts`, Page ID, Graph API version, token and data
   expiry, and the Page's API-visible `is_published` and `can_post` status.
 

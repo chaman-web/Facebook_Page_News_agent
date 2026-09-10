@@ -248,8 +248,8 @@ def test_tier1_bypasses_regular_daily_limit_but_obeys_global_gap(tmp_path):
         breaking = QueueEntry("Breaking", "B", "https://b.test", "breaking", 90,
                               now.isoformat(), route=Route.PUBLISH_NOW.value)
         assert queue.can_publish_today() is False
-        assert queue.deserves_publishing(breaking, now - timedelta(minutes=11))[0] is True
-        assert queue.deserves_publishing(breaking, now - timedelta(minutes=5))[0] is False
+        assert queue.deserves_publishing(breaking, now - timedelta(minutes=31))[0] is True
+        assert queue.deserves_publishing(breaking, now - timedelta(minutes=29))[0] is False
 
 
 def test_tier1_blocks_tier2_until_high_impact_lane_is_clear(tmp_path):

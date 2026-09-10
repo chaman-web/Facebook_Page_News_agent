@@ -2,7 +2,7 @@
 pipeline/posting_queue.py — Editorial posting queue for Global Pulse News.
 
 Two-tier behavior:
-  Tier 1: score >= 80 or impact >= 10. Unlimited per day, with a 10-minute
+  Tier 1: score >= 80 or impact >= 10. Unlimited per day, with a 30-minute
           minimum gap from the previous post.
   Tier 2: score 65-79.9. Highest score publishes first, with a 30-minute gap
           and a limit of 12 regular posts per local day.
@@ -53,9 +53,9 @@ TIER1_PUBLISH_NOW = 85.0   # Backwards-compatible alias; new routing uses 80.
 TIER1_NEXT_SLOT   = 60.0   # Backwards-compatible alias; new entries use SCHEDULE.
 
 # Intervals
-PUBLISH_NOW_MIN_GAP = timedelta(minutes=10)   # Feature #5 — token bucket
-NEXT_SLOT_INTERVAL  = timedelta(minutes=30)
-SCHEDULE_INTERVAL   = timedelta(minutes=30)
+PUBLISH_NOW_MIN_GAP = timedelta(minutes=30)   # Same global cadence as Tier 2
+NEXT_SLOT_INTERVAL  = PUBLISH_NOW_MIN_GAP
+SCHEDULE_INTERVAL   = PUBLISH_NOW_MIN_GAP
 
 # Daily limit for regular Tier 2 posts
 TIER2_DAILY_LIMIT = 12

@@ -53,12 +53,12 @@ def test_first_immediate_post_has_no_spacing_delay():
     sleep.assert_not_called()
 
 
-def test_later_immediate_post_waits_for_ten_minute_gap():
+def test_later_immediate_post_waits_for_thirty_minute_gap():
     now = datetime.now(timezone.utc)
     with patch("agent.time.sleep") as sleep:
         waited = _wait_for_immediate_spacing(
             now.replace(microsecond=0),
             now=now.replace(microsecond=0),
         )
-    assert waited == 600
-    sleep.assert_called_once_with(600)
+    assert waited == 1800
+    sleep.assert_called_once_with(1800)
