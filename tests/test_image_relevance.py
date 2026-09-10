@@ -8,6 +8,7 @@ from image.maker import (
     _context_line,
     _fallback_background,
     _fetch_article_photo,
+    _find_impact_words,
     _headline_display_case,
     _apply_image_provenance,
     _image_description_matches,
@@ -36,6 +37,18 @@ def test_headline_display_case_preserves_news_acronyms():
         _headline_display_case("UK AND US AGREE ON AI SAFETY PLAN")
         == "UK and US Agree on AI Safety Plan"
     )
+
+
+def test_headline_emphasis_selects_two_high_impact_words():
+    assert _find_impact_words("Earthquake Kills 12 People in Turkey") == [
+        "Kills", "Earthquake",
+    ]
+
+
+def test_headline_emphasis_uses_specific_anchors_without_impact_terms():
+    assert _find_impact_words("Apple Unveils Foldable iPhone") == [
+        "Foldable", "iPhone",
+    ]
 
 
 def test_article_photo_is_preferred_when_available():

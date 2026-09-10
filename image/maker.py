@@ -118,8 +118,8 @@ CATEGORY_DOT_COLORS = {
 
 # ── Impact word detection ─────────────────────────────────────────────────────
 # Words that carry strong emotional or editorial weight.
-# The highest-priority match in the headline gets a red highlight box.
-# Ordered by descending impact — first match wins.
+# Up to two high-value words receive a restrained red highlight box.
+# Ordered by descending impact.
 _IMPACT_WORDS: list[tuple[int, list[str]]] = [
     # Tier 1 — life/death/catastrophe
     (1, ["KILLED", "KILLS", "DEAD", "DIED", "DEATH", "DEATHS",
@@ -147,25 +147,44 @@ _IMPACT_WORDS: list[tuple[int, list[str]]] = [
 
 def _find_impact_words(headline: str) -> list[str]:
     """
-    Find the most impactful word in the headline.
+    Find one or two concise words that carry the headline's meaning.
     Returns words as they appear in the headline (preserving case).
-    Tier 1 words get priority — if 2 Tier 1 words found, return both.
-    Otherwise return best from Tier 1 + best from Tier 2, etc.
+    Explicit impact language wins; ordinary headlines use specific content
+    anchors rather than filler or generic reporting verbs.
     """
-    words       = re.findall(r"[A-Za-z']+", headline)
+    words       = re.findall(r"[A-Za-z0-9][A-Za-z0-9'%-]*", headline)
     upper_words = [w.upper() for w in words]
     found: list[str] = []
 
     for _tier, word_list in _IMPACT_WORDS:
         for impact in word_list:
-            if impact in upper_words:
-                idx = upper_words.index(impact)
-                original = words[idx]
-                if original not in found:
-                    found.append(original)
-            if len(found) >= 1:
+            for idx, upper_word in enumerate(upper_words):
+                if impact == upper_word and words[idx] not in found:
+                    found.append(words[idx])
+                    break
+            if len(found) >= 2:
                 return found
-    return found
+
+    if found:
+        return found
+
+    stop_words = {
+        "about", "after", "amid", "before", "could", "from", "into",
+        "more", "news", "over", "report", "reports", "says", "said",
+        "that", "their", "this", "update", "updates", "with", "would",
+        "announces", "announced", "reveals", "revealed", "unveils", "new",
+    }
+    candidates = [
+        (index, word) for index, word in enumerate(words)
+        if len(word) >= 4 and word.lower() not in stop_words
+    ]
+    candidates.sort(key=lambda item: (
+        bool(re.search(r"\d", item[1])),
+        item[1].isupper() and len(item[1]) >= 2,
+        len(item[1]),
+        -item[0],
+    ), reverse=True)
+    return [word for _, word in candidates[:2]]
 
 
 # Keep old name as alias for any legacy callers
@@ -1003,7 +1022,11 @@ def _compose(
             x_cursor = ML
             for word in line.split():
                 word_width = int(draw.textlength(word + " ", font=hl_font))
-                matched = next((item for item in remaining_impacts if word.upper() == item.upper()), None)
+                clean_word = re.sub(r"^[^A-Za-z0-9]+|[^A-Za-z0-9'%-]+$", "", word)
+                matched = next(
+                    (item for item in remaining_impacts if clean_word.upper() == item.upper()),
+                    None,
+                )
                 if matched:
                     pad = 6
                     space_width = int(draw.textlength(" ", font=hl_font))
