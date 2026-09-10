@@ -6,20 +6,18 @@ $logsDir    = "$projectDir\logs"
 # Create logs folder if not exists
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir }
 
-# --- Job 1: Fetch & Build — every 3 hours (PKT times) ---
+# --- Job 1: Fetch & Build — every 4 hours (PKT times) ---
 $action1 = New-ScheduledTaskAction `
     -Execute (Join-Path $projectDir "run_job1_fetch.bat") `
     -WorkingDirectory $projectDir
 
 $trigger1 = @(
-    $(New-ScheduledTaskTrigger -Daily -At "06:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "09:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "12:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "15:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "18:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "21:00"),
     $(New-ScheduledTaskTrigger -Daily -At "00:00"),
-    $(New-ScheduledTaskTrigger -Daily -At "03:00")
+    $(New-ScheduledTaskTrigger -Daily -At "04:00"),
+    $(New-ScheduledTaskTrigger -Daily -At "08:00"),
+    $(New-ScheduledTaskTrigger -Daily -At "12:00"),
+    $(New-ScheduledTaskTrigger -Daily -At "16:00"),
+    $(New-ScheduledTaskTrigger -Daily -At "20:00")
 )
 
 $settings1 = New-ScheduledTaskSettingsSet `
@@ -37,7 +35,7 @@ Register-ScheduledTask `
     -Force `
     -ErrorAction Stop
 
-Write-Host "OK Job 1 registered - every 3 hours"
+Write-Host "OK Job 1 registered - every 4 hours"
 
 # --- Job 2: Publish — inspect the two-tier queue every 10 minutes ---
 $action2 = New-ScheduledTaskAction `

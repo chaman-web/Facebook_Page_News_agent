@@ -1264,7 +1264,7 @@ Examples:
         try:
             # Fetch runs are infrequent and expensive. If one starts during a
             # short publisher check, wait for that check instead of losing the
-            # entire three-hour fetch slot. Publisher checks remain nonblocking
+            # entire four-hour fetch slot. Publisher checks remain nonblocking
             # because they retry automatically every ten minutes.
             lock_wait_seconds = 120 if args.fetch else 0
             with pipeline_lock(
