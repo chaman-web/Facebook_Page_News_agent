@@ -136,6 +136,33 @@ def test_recent_feed_cache_covers_temporary_outage(tmp_path):
     failure.assert_called_once()
 
 
+def test_empty_feed_uses_cache_and_counts_as_endpoint_failure(tmp_path):
+    url = "https://feed.example/rss"
+    story = Story(
+        title="Cached regional emergency update",
+        source_name="Example News",
+        source_url="https://example.com/emergency",
+        published_at=datetime.now(timezone.utc),
+        raw_summary="Previously fetched details remain available.",
+    )
+    with (
+        patch.object(fetcher, "_FEED_CACHE_DIR", tmp_path),
+        patch.object(fetcher, "_parse_rss_feed", return_value=[story]),
+        patch.object(fetcher, "record_success"),
+    ):
+        fetcher._fetch_feed_resilient(url, limit=10, context="Regional fetch")
+
+    with (
+        patch.object(fetcher, "_FEED_CACHE_DIR", tmp_path),
+        patch.object(fetcher, "_parse_rss_feed", return_value=[]),
+        patch.object(fetcher, "record_failure") as failure,
+    ):
+        cached = fetcher._fetch_feed_resilient(url, limit=10, context="Regional fetch")
+
+    assert [item.source_url for item in cached] == [story.source_url]
+    failure.assert_called_once()
+
+
 def test_shared_feed_is_fetched_only_once_per_job():
     shared_url = "https://feed.example/rss"
     story = Story(

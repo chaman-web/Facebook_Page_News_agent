@@ -32,7 +32,12 @@ import requests
 import config
 from models import NewsSourceError, Story
 from pipeline.source_health import is_banned, record_failure, record_success
-from news.regional_sources import REGIONAL_FEEDS, discovery_priority, is_region_relevant
+from news.regional_sources import (
+    REGIONAL_FEEDS,
+    discovery_priority,
+    is_high_impact_candidate,
+    is_region_relevant,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -451,6 +456,14 @@ def fetch_regional_news(
 
         candidates.sort(key=discovery_priority, reverse=True)
         chosen = candidates[:limit_per_region]
+        chosen_urls = {story.source_url for story in chosen}
+        # The regional quota is a minimum sample, never a ceiling for major
+        # local developments. Preserve every additional impact candidate for
+        # normal clustering, verification and editorial scoring.
+        chosen.extend(
+            story for story in candidates[limit_per_region:]
+            if story.source_url not in chosen_urls and is_high_impact_candidate(story)
+        )
         selected.extend(chosen)
         coverage[region] = len(chosen)
 
@@ -575,6 +588,8 @@ def _fetch_feed_resilient(feed_url: str, limit: int, context: str) -> list[Story
     """Fetch one endpoint, falling back to recent cached stories on failure."""
     try:
         stories = _parse_rss_feed(feed_url, limit=limit)
+        if not stories:
+            raise NewsSourceError("Endpoint returned no usable RSS entries")
         record_success(feed_url)
         if stories:
             _save_feed_cache(feed_url, stories)

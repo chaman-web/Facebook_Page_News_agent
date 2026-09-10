@@ -16,11 +16,22 @@ REGIONAL_FEEDS: dict[str, tuple[str, ...]] = {
         "https://www.dawn.com/feeds/home",
         "https://geo.tv/rss/10",
         "https://www.thenews.com.pk/rss/1/1",
+        "https://arynews.tv/feed/",
+        "https://tribune.com.pk/feed/home",
+        "https://www.app.com.pk/feed/",
     ),
     "india": (
         "https://timesofindia.indiatimes.com/rssfeedstopstories.cms",
         "https://feeds.feedburner.com/ndtvnews-top-stories",
         "https://www.thehindu.com/feeder/default.rss",
+        "https://indianexpress.com/feed/",
+        "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml",
+        "https://theprint.in/feed/",
+        "https://feeds.bbci.co.uk/news/world/asia/rss.xml",
+    ),
+    "south_asia": (
+        "https://www.thedailystar.net/frontpage/rss.xml",
+        "https://kathmandupost.com/rss",
         "https://feeds.bbci.co.uk/news/world/asia/rss.xml",
     ),
     "gulf_ksa_uae": (
@@ -31,36 +42,57 @@ REGIONAL_FEEDS: dict[str, tuple[str, ...]] = {
     "middle_east": (
         "https://feeds.bbci.co.uk/news/world/middle_east/rss.xml",
         "https://www.aljazeera.com/xml/rss/all.xml",
+        "https://www.timesofisrael.com/feed/",
+        "https://www.dailystar.com.lb/RSS.aspx",
     ),
     "turkey": (
         "https://www.dailysabah.com/rssfeed/12/2",
+        "https://www.hurriyetdailynews.com/rss",
         "https://feeds.bbci.co.uk/news/world/europe/rss.xml",
     ),
     "europe": (
         "https://feeds.bbci.co.uk/news/world/europe/rss.xml",
         "https://www.theguardian.com/world/europe-news/rss",
+        "https://rss.dw.com/rdf/rss-en-all",
+        "https://www.france24.com/en/rss",
+        "https://www.euronews.com/rss?level=theme&name=news",
+        "https://www.rte.ie/feeds/rss/?index=/news/",
     ),
     "east_southeast_asia": (
         "https://feeds.bbci.co.uk/news/world/asia/rss.xml",
         "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml",
+        "https://www.japantimes.co.jp/feed/topstories/",
+        "https://www.scmp.com/rss/91/feed",
+        "https://www.koreaherald.com/rss/newsAll",
+        "https://www.rappler.com/feed/",
     ),
     "africa": (
         "https://feeds.bbci.co.uk/news/world/africa/rss.xml",
         "https://www.africanews.com/feed/rss",
+        "https://feeds.news24.com/articles/news24/TopStories/rss",
+        "https://nation.africa/kenya/rss",
+        "https://www.premiumtimesng.com/feed",
+        "https://english.ahram.org.eg/UI/Front/RSS.aspx",
     ),
     "north_america": (
         "https://www.cbc.ca/cmlink/rss-topstories",
         "https://feeds.npr.org/1001/rss.xml",
+        "https://globalnews.ca/feed/",
     ),
     "latin_america": (
         "https://feeds.bbci.co.uk/news/world/latin_america/rss.xml",
+        "https://en.mercopress.com/rss",
+        "https://buenosairesherald.com/feed",
     ),
     "oceania": (
         "https://www.abc.net.au/news/feed/51120/rss.xml",
         "https://www.theguardian.com/australia-news/rss",
+        "https://www.rnz.co.nz/rss/national.xml",
+        "https://www.sbs.com.au/news/topic/latest/feed",
     ),
     "official_global": (
         "https://news.un.org/feed/subscribe/en/news/all/rss.xml",
+        "https://www.who.int/rss-feeds/news-english.xml",
     ),
 }
 
@@ -70,6 +102,10 @@ REGIONAL_TERMS: dict[str, re.Pattern[str]] = {
     ),
     "india": re.compile(
         r"\b(?:india|indian|new delhi|delhi|mumbai|bengaluru|kolkata|chennai|modi|kashmir)\b", re.I
+    ),
+    "south_asia": re.compile(
+        r"\b(?:bangladesh|bangladeshi|dhaka|nepal|nepali|kathmandu|sri lanka|sri lankan|colombo|"
+        r"bhutan|maldives|maldivian|afghanistan|afghan|kabul)\b", re.I
     ),
     "gulf_ksa_uae": re.compile(
         r"\b(?:gulf|uae|emirates|dubai|abu dhabi|saudi|riyadh|ksa|qatar|doha|oman|bahrain|kuwait)\b", re.I
@@ -125,6 +161,12 @@ def discovery_priority(story: Story) -> tuple[int, float]:
         published = published.replace(tzinfo=timezone.utc)
     age_hours = max(0.0, (datetime.now(timezone.utc) - published).total_seconds() / 3600)
     return impact_hits, -age_hours
+
+
+def is_high_impact_candidate(story: Story) -> bool:
+    """Protect locally important candidates from the regional sample limit."""
+    text = f"{story.title} {story.raw_summary}"
+    return bool(_DISCOVERY_IMPACT.search(text))
 
 
 def is_region_relevant(story: Story, region: str) -> bool:
