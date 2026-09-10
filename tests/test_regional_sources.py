@@ -78,6 +78,20 @@ def test_additional_high_impact_regional_candidates_bypass_sample_limit():
     }
 
 
+def test_expired_high_impact_story_is_excluded_from_regional_discovery():
+    expired = _story("Pakistan declares national emergency", 49 * 60)
+    expired.source_url = "https://local.test/expired-emergency"
+
+    with (
+        patch("news.fetcher.REGIONAL_FEEDS", {"pakistan": ("https://feed.test/rss",)}),
+        patch("news.fetcher.is_banned", return_value=False),
+        patch("news.fetcher._fetch_feed_resilient", return_value=[expired]),
+    ):
+        selected = fetch_regional_news(limit_per_region=1)
+
+    assert selected == []
+
+
 def test_new_local_publishers_are_classified_as_established_sources():
     for url in (
         "https://arynews.tv/feed/",

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 from unittest.mock import Mock, patch
 
 import requests
@@ -88,13 +89,14 @@ def test_duplicate_heavy_feed_is_recorded_without_cooling(tmp_path):
 
 
 def test_transient_rss_request_is_retried_once():
+    published = format_datetime(datetime.now(timezone.utc))
     response = Mock()
-    response.content = b"""
+    response.content = f"""
         <rss><channel><title>Example News</title><item>
         <title>Important update</title><link>https://example.com/story</link>
         <description>Verified details.</description>
-        </item></channel></rss>
-    """
+        <pubDate>{published}</pubDate></item></channel></rss>
+    """.encode()
     response.raise_for_status.return_value = None
 
     with (
@@ -106,6 +108,43 @@ def test_transient_rss_request_is_retried_once():
     assert len(stories) == 1
     assert get.call_count == 2
     sleep.assert_called_once()
+
+
+def test_rss_story_without_publication_date_is_skipped():
+    response = Mock()
+    response.content = b"""
+        <rss><channel><title>Example News</title><item>
+        <title>Undated update</title><link>https://example.com/undated</link>
+        <description>Details with no trustworthy publication time.</description>
+        </item></channel></rss>
+    """
+    response.raise_for_status.return_value = None
+
+    with patch("news.fetcher.requests.get", return_value=response):
+        stories = fetcher._parse_rss_feed("https://feed.example/rss", limit=10)
+
+    assert stories == []
+
+
+def test_story_freshness_uses_hard_48_hour_boundary():
+    now = datetime(2026, 9, 10, 12, 0, tzinfo=timezone.utc)
+    at_boundary = Story(
+        title="Boundary story",
+        source_name="Example News",
+        source_url="https://example.com/boundary",
+        published_at=now - timedelta(hours=48),
+        raw_summary="",
+    )
+    expired = Story(
+        title="Expired story",
+        source_name="Example News",
+        source_url="https://example.com/expired",
+        published_at=now - timedelta(hours=48, seconds=1),
+        raw_summary="",
+    )
+
+    assert fetcher._is_story_fresh(at_boundary, now=now)
+    assert not fetcher._is_story_fresh(expired, now=now)
 
 
 def test_recent_feed_cache_covers_temporary_outage(tmp_path):
@@ -134,6 +173,21 @@ def test_recent_feed_cache_covers_temporary_outage(tmp_path):
 
     assert [item.source_url for item in cached] == [story.source_url]
     failure.assert_called_once()
+
+
+def test_recent_feed_cache_does_not_restore_expired_story(tmp_path):
+    url = "https://feed.example/rss"
+    expired = Story(
+        title="Old cached update",
+        source_name="Example News",
+        source_url="https://example.com/old-cache",
+        published_at=datetime.now(timezone.utc) - timedelta(hours=49),
+        raw_summary="Expired details.",
+    )
+
+    with patch.object(fetcher, "_FEED_CACHE_DIR", tmp_path):
+        fetcher._save_feed_cache(url, [expired])
+        assert fetcher._load_feed_cache(url, limit=10) == []
 
 
 def test_empty_feed_uses_cache_and_counts_as_endpoint_failure(tmp_path):

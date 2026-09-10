@@ -24,6 +24,7 @@ import logging
 import random
 import time
 from datetime import datetime, timedelta, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import feedparser
@@ -330,7 +331,7 @@ def fetch_news(
     def _add(stories: list[Story]) -> int:
         added = 0
         for s in stories:
-            if s.source_url not in seen_urls:
+            if _is_story_fresh(s) and s.source_url not in seen_urls:
                 seen_urls.add(s.source_url)
                 pool.append(s)
                 added += 1
@@ -448,7 +449,11 @@ def fetch_regional_news(
                 )
             stories = copy.deepcopy(run_cache[feed_url])
             for story in stories:
-                if story.source_url not in seen_urls and is_region_relevant(story, region):
+                if (
+                    _is_story_fresh(story)
+                    and story.source_url not in seen_urls
+                    and is_region_relevant(story, region)
+                ):
                     story.region = region
                     story.category = "world"
                     candidates.append(story)
@@ -524,10 +529,14 @@ def _article_to_story(article: dict) -> Story | None:
     source_name  = (source.get("name") or "Unknown").strip()
     raw_summary  = (article.get("description") or article.get("content") or "").strip()
     published_at = _parse_datetime(article.get("publishedAt"))
-    return Story(
+    if published_at is None:
+        logger.debug("Skipping undated NewsAPI story: %s", title[:100])
+        return None
+    story = Story(
         title=title, source_name=source_name, source_url=url,
         published_at=published_at, raw_summary=raw_summary,
     )
+    return story if _is_story_fresh(story) else None
 
 
 # ---------------------------------------------------------------------------
@@ -568,19 +577,34 @@ def _parse_rss_feed(feed_url: str, limit: int = 10) -> list[Story]:
         if not title or not url:
             continue
         raw_summary  = (getattr(entry, "summary", "") or "").strip()
-        published_at = datetime.now(timezone.utc)
-        if hasattr(entry, "published_parsed") and entry.published_parsed:
+        published_at = None
+        for date_field in ("published_parsed", "updated_parsed"):
+            parsed_value = getattr(entry, date_field, None)
+            if not parsed_value:
+                continue
             try:
-                published_at = datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+                published_at = datetime(*parsed_value[:6], tzinfo=timezone.utc)
+                break
             except (TypeError, ValueError):
-                pass
+                continue
+        if published_at is None:
+            for date_field in ("published", "updated", "date"):
+                published_at = _parse_datetime(getattr(entry, date_field, None))
+                if published_at is not None:
+                    break
+        if published_at is None:
+            logger.debug("Skipping RSS story without a trustworthy date: %s", title[:100])
+            continue
         source_name = (
             getattr(feed.feed, "title", None) or feed_url.split("/")[2]
         ).strip()
-        stories.append(Story(
+        story = Story(
             title=title, source_name=source_name, source_url=url,
             published_at=published_at, raw_summary=raw_summary,
-        ))
+        )
+        # Keep dated entries here so a healthy but quiet feed is not recorded as
+        # failed. Discovery and cache loading apply the hard freshness gate.
+        stories.append(story)
     return stories
 
 
@@ -659,15 +683,15 @@ def _load_feed_cache(feed_url: str, limit: int) -> list[Story]:
             published_at = datetime.fromisoformat(item["published_at"])
             if published_at.tzinfo is None:
                 published_at = published_at.replace(tzinfo=timezone.utc)
-            stories.append(
-                Story(
-                    title=item["title"],
-                    source_name=item["source_name"],
-                    source_url=item["source_url"],
-                    published_at=published_at,
-                    raw_summary=item.get("raw_summary", ""),
-                )
+            story = Story(
+                title=item["title"],
+                source_name=item["source_name"],
+                source_url=item["source_url"],
+                published_at=published_at,
+                raw_summary=item.get("raw_summary", ""),
             )
+            if _is_story_fresh(story):
+                stories.append(story)
         return stories
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return []
@@ -677,10 +701,26 @@ def _load_feed_cache(feed_url: str, limit: int) -> list[Story]:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _parse_datetime(value: str | None) -> datetime:
+def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
-        return datetime.now(timezone.utc)
+        return None
     try:
-        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        return datetime.now(timezone.utc)
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _is_story_fresh(story: Story, now: datetime | None = None) -> bool:
+    """Return true only when a story is within the configured news window."""
+    reference = now or datetime.now(timezone.utc)
+    published_at = story.published_at
+    if published_at.tzinfo is None:
+        published_at = published_at.replace(tzinfo=timezone.utc)
+    age = reference - published_at.astimezone(timezone.utc)
+    return age <= timedelta(hours=config.NEWS_MAX_AGE_HOURS)
