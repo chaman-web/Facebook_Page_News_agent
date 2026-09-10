@@ -21,6 +21,7 @@ import requests
 import config
 from facebook.token_manager import TokenExpiredError, TokenManager
 from models import DraftStatus, Story, VerificationStatus
+from pipeline.caption_sanitizer import sanitize_facebook_caption
 from pipeline.meta_policy_gate import PolicyDecision, evaluate_meta_policy
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,7 @@ class FatalPublishError(Exception):
 
 def _clean_text(text: str) -> str:
     """Sanitise post text — normalize unicode and replace fancy punctuation."""
-    text = unicodedata.normalize("NFC", text)
+    text = sanitize_facebook_caption(unicodedata.normalize("NFC", text))
     replacements = {
         "\u2018": "'", "\u2019": "'",
         "\u201c": '"', "\u201d": '"',
@@ -53,7 +54,7 @@ def _clean_text(text: str) -> str:
     for src, dst in replacements.items():
         text = text.replace(src, dst)
     text = re.sub(r"[^\S\n\t ]+", " ", text)
-    return text.strip()
+    return sanitize_facebook_caption(text)
 
 
 def _format_post(post_content: str, hashtags: list[str]) -> str:

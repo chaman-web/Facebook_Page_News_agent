@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 
 import config
 from models import GenerationError, Story, VerificationStatus
+from pipeline.caption_sanitizer import sanitize_facebook_caption
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,7 @@ def generate_post(story: Story) -> Story:
         hashtags = _generate_hashtags(story)
         story.card_headline = select_card_headline(story, raw_output)
         story.card_description = select_card_description(story, raw_output)
-        post_content = _format_post(post_content, story)
+        post_content = sanitize_facebook_caption(_format_post(post_content, story))
         fact_check = check_generated_facts(story, post_content)
         if not fact_check.passed:
             last_error = GenerationError("Generated caption failed fact grounding: " + "; ".join(fact_check.issues[:4]))
@@ -287,7 +288,7 @@ POST LENGTH — based on available information:
 
 FORMATTING RULES (follow exactly):
 - Write in SHORT PARAGRAPHS — maximum 2-3 sentences per paragraph.
-- Put a BLANK LINE between every paragraph.
+- Separate paragraphs with one empty line. Never print formatting instructions such as "blank line".
 - DO NOT start with boring phrases like "In a significant development..." or "According to reports..." or "It has been reported that..."
 - Use 1-2 relevant emojis per paragraph as visual anchors — not decoration.
 - Add one natural, story-specific question only when it improves understanding.
@@ -305,11 +306,11 @@ Line 2: Start with "Why this matters:" and give one grounded sentence explaining
 Line 3 (optional): One key detail or number that adds weight.
 
 At the very end of the post, always include:
-📰 Sources: <comma-separated source names>
+End with a Sources line containing the supplied source names.
 
 Output format (return exactly this structure, nothing else):
 CARD_HEADLINES:
-<Write exactly 3 alternative card headlines, numbered 1–3. Each must be 4–9 words, active voice, a complete thought, and understandable in one second on a phone.
+Write exactly 3 alternative card headlines, numbered 1–3. Each must be 4–9 words, active voice, a complete thought, and understandable in one second on a phone.
 
 1. FACT-LED: lead with the strongest verified fact or number.
 2. IMPACT-LED: show who is affected or why the update matters.
@@ -329,16 +330,16 @@ GOOD: "6 DEAD AS DELHI BUILDING COLLAPSES"
 BAD (vague): "PAKISTAN REJECTS INDIA BASELESS CLAIMS ON OCCUPIED"
 GOOD: "PAKISTAN REJECTS INDIA'S KASHMIR CLAIMS"
 
-Write three punchy complete statements, not truncated titles.>
+Write three punchy complete statements, not truncated titles.
 
 CARD_DESCRIPTION:
-<Write one complete sentence of 7–18 words. It must add the strongest verified
+Write one complete sentence of 7–18 words. It must add the strongest verified
 consequence or key detail, remain clearly relevant to the same story, and be
 different from all card headlines. Do not repeat the title, ask a question,
-use clickbait, or introduce any fact absent from the supplied evidence.>
+use clickbait, or introduce any fact absent from the supplied evidence.
 
+After the POST label, write the complete Facebook post without template markers or HTML tags.
 POST:
-<your full Facebook post text here>
 """
 
 
@@ -449,8 +450,8 @@ The post MUST follow this structure:
 LINE 1: {cat_emoji} [single most striking verified fact — under 12 words]
 LINE 2: Why this matters: [one consequence or stake supported by the supplied evidence]
 LINE 3 (optional): [one key detail or number that adds weight]
-[BLANK LINE]
-BODY: 2-3 short paragraphs (max 2-3 sentences each), blank line between each.
+Then add one empty line before the body.
+BODY: 2-3 short paragraphs (max 2-3 sentences each), with one empty line between paragraphs.
 OPTIONAL QUESTION: Include only a specific, natural question that adds civic or practical context. Omit it when it would be generic. Never request likes, shares, comments, tags, or reactions, and do not add 👇.
 SOURCES: 📰 Sources: {', '.join(unique_source_names)}
 
@@ -505,7 +506,7 @@ def _grounded_fallback_post(story: Story) -> str:
 
 def _format_post(post: str, story: Story | None = None) -> str:
     """Build a card-matched two-line hook followed by a readable body."""
-    post = re.sub(r"\n{3,}", "\n\n", post.strip())
+    post = sanitize_facebook_caption(post)
     if story is None:
         return post
 
@@ -548,7 +549,7 @@ def _format_post(post: str, story: Story | None = None) -> str:
     body = "\n\n".join(body_lines)
 
     opening = f"{hook_line}\n{context}"
-    return opening + (f"\n\n{body}" if body else "")
+    return sanitize_facebook_caption(opening + (f"\n\n{body}" if body else ""))
 
 
 # ---------------------------------------------------------------------------

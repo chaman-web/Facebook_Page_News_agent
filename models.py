@@ -54,6 +54,8 @@ class Story:
     article_image_url: str | None = None
     article_image_reuse_permitted: bool = False
     region: str = "global"
+    regional_impact_score: float = 0.0
+    regional_impact_reasons: list[str] = field(default_factory=list)
     priority_protected: bool = False
 
     # --- Generation ---

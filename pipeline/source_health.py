@@ -237,7 +237,7 @@ def _start_cooldown(feed_url: str, entry: dict) -> None:
         grouped,
     )
     if _is_important(feed_url) and duration >= 360:
-        logger.error(
+        logger.warning(
             "SOURCE COVERAGE ALERT: important endpoint has a prolonged outage; "
             "alternative feeds and cached discovery remain active — %s",
             feed_url,

@@ -26,6 +26,7 @@ import logging
 import re
 
 from models import GenerationError, Story
+from pipeline.caption_sanitizer import sanitize_facebook_caption
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +73,8 @@ def validate_post(story: Story) -> Story:
     Only raises ContentValidationError for truly unfixable issues.
     Everything else: warn and continue.
     """
-    post     = story.post_content or ""
+    story.post_content = sanitize_facebook_caption(story.post_content)
+    post     = story.post_content
     hashtags = story.hashtags or []
 
     # ── HARD: empty post ────────────────────────────────────────────────────

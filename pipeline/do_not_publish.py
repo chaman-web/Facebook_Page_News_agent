@@ -308,9 +308,10 @@ def _check_unreliable_source(story: Story) -> DNPVerdict:
 
 def _check_duplicate_url(story: Story) -> DNPVerdict:
     """Check #1 — exact URL already published."""
-    from pipeline.deduplicator import _load_seen
+    from pipeline.deduplicator import _load_seen, canonical_story_url
     seen = _load_seen()
-    if story.source_url in seen.get("urls", []):
+    story_url = canonical_story_url(story.source_url)
+    if story_url in {canonical_story_url(url) for url in seen.get("urls", [])}:
         return DNPVerdict(
             DNPDecision.REJECT, "DUPLICATE_URL",
             f"URL already published: {story.source_url}",

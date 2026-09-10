@@ -49,6 +49,7 @@ from enum import Enum
 
 import config
 from models import Story
+from news.regional_sources import assess_regional_impact
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ class EditorialScore:
     tier_was_overridden:  bool    = False
     impact_score:         float   = 0.0
     impact_reasons:       tuple[str, ...] = ()
+    regional_impact_score: float = 0.0
+    regional_impact_reasons: tuple[str, ...] = ()
     shadow_total:         float   = 0.0
     shadow_tier:          EditorialTier = EditorialTier.REJECT
 
@@ -409,10 +412,22 @@ def score_story(story: Story) -> EditorialScore:
     freshness          = _score_freshness(story.published_at, text)
     visual_potential   = _score_visual_potential(text)
     impact_score, impact_reasons = assess_high_impact(text)
+    regional_impact = assess_regional_impact(story)
+    regional_bonus = min(6.0, regional_impact.score * 0.6)
+    story.regional_impact_score = regional_impact.score
+    story.regional_impact_reasons = list(regional_impact.reasons)
+
+    source_tier_num = int(getattr(story, "source_tier", 4) or 4)
+    if regional_impact.is_major and source_tier_num <= 3:
+        impact_score = max(impact_score, 10.0)
+        impact_reasons = tuple(dict.fromkeys(
+            impact_reasons
+            + tuple(f"regional-{reason}" for reason in regional_impact.reasons)
+        ))
 
     raw_total = (
         news_value + breaking_urgency + audience_interest
-        + source_credibility + freshness + visual_potential
+        + source_credibility + freshness + visual_potential + regional_bonus
     )
 
     tier_num   = CATEGORY_TIERS.get(category, 2)
@@ -447,7 +462,6 @@ def score_story(story: Story) -> EditorialScore:
     # Protect consequential updates from keyword/category bias. Verification is
     # still a separate mandatory gate, and only established sources receive the
     # floor, so this cannot turn an unverified claim into an automatic post.
-    source_tier_num = int(getattr(story, "source_tier", 4) or 4)
     if source_tier_num <= 3:
         if impact_score >= 15:
             total = max(total, 90.0)
@@ -465,6 +479,7 @@ def score_story(story: Story) -> EditorialScore:
         freshness=freshness,
         visual_potential=visual_potential,
         impact_score=impact_score,
+        regional_bonus=regional_bonus,
     )
     shadow_tier = _classify_tier(shadow_total)
 
@@ -479,6 +494,11 @@ def score_story(story: Story) -> EditorialScore:
     reason += f" | Verification {verification_value} {verification_score:.0f}/100 (separate gate)"
     if impact_reasons:
         reason += f" | Impact {impact_score:.0f}/20: {', '.join(impact_reasons)}"
+    if regional_impact.score:
+        reason += (
+            f" | Regional impact {regional_impact.score:.0f}/10 "
+            f"(+{regional_bonus:.1f}): {', '.join(regional_impact.reasons)}"
+        )
     reason += f" | Keyword-reduced shadow {shadow_total:.1f}/100 [{shadow_tier.value}]"
     region = getattr(story, "region", "global")
     if region != "global":
@@ -500,6 +520,8 @@ def score_story(story: Story) -> EditorialScore:
         tier_was_overridden  = (override == 1),
         impact_score         = impact_score,
         impact_reasons       = impact_reasons,
+        regional_impact_score = regional_impact.score,
+        regional_impact_reasons = regional_impact.reasons,
         shadow_total         = shadow_total,
         shadow_tier          = shadow_tier,
     )
@@ -664,6 +686,7 @@ def _keyword_reduced_shadow_total(
     freshness: float,
     visual_potential: float,
     impact_score: float,
+    regional_bonus: float = 0.0,
 ) -> float:
     """Evaluate lower keyword authority without changing live routing."""
     if any(re.search(pattern, text, re.IGNORECASE) for pattern in _LOW_VALUE_PATTERNS):
@@ -708,7 +731,7 @@ def _keyword_reduced_shadow_total(
 
     raw_total = (
         news_value + breaking_urgency + audience_interest
-        + source_credibility + freshness + visual_potential
+        + source_credibility + freshness + visual_potential + regional_bonus
     )
     if tier_num == 1:
         raw_total = min(raw_total + _TIER1_FLOOR_BOOST, 100.0)

@@ -2,7 +2,7 @@
 pipeline/posting_queue.py — Editorial posting queue for Global Pulse News.
 
 Two-tier behavior:
-  Tier 1: score >= 80 or impact >= 10. Unlimited per day, with a 10-minute
+  Tier 1: score >= 80 or impact >= 10. Unlimited per day, with a 30-minute
           minimum gap from the previous post.
   Tier 2: score 65-79.9. Highest score publishes first, with a 30-minute gap
           and a limit of 12 regular posts per local day.
@@ -23,6 +23,7 @@ from typing import Optional
 
 import config
 from models import Story, VerificationStatus
+from pipeline.deduplicator import canonical_story_url
 from pipeline.editorial_scorer import CATEGORY_TIERS
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,9 @@ TIER1_PUBLISH_NOW = 85.0   # Backwards-compatible alias; new routing uses 80.
 TIER1_NEXT_SLOT   = 60.0   # Backwards-compatible alias; new entries use SCHEDULE.
 
 # Intervals
-PUBLISH_NOW_MIN_GAP = timedelta(minutes=10)   # Feature #5 — token bucket
-NEXT_SLOT_INTERVAL  = timedelta(minutes=30)
-SCHEDULE_INTERVAL   = timedelta(minutes=30)
+PUBLISH_NOW_MIN_GAP = timedelta(minutes=30)   # Same global cadence as Tier 2
+NEXT_SLOT_INTERVAL  = PUBLISH_NOW_MIN_GAP
+SCHEDULE_INTERVAL   = PUBLISH_NOW_MIN_GAP
 
 # Daily limit for regular Tier 2 posts
 TIER2_DAILY_LIMIT = 12
@@ -260,7 +261,8 @@ class PostingQueue:
         # automatic Tier 2 -> Tier 1 promotion after new corroboration.
         existing = next(
             (entry for entry in self._entries
-             if entry.source_url == story.source_url and entry.status in {"QUEUED", "REVIEW_REQUIRED"}),
+             if canonical_story_url(entry.source_url) == canonical_story_url(story.source_url)
+             and entry.status in {"QUEUED", "REVIEW_REQUIRED"}),
             None,
         )
         if existing is not None:
@@ -375,6 +377,9 @@ class PostingQueue:
                 return False, f"Tier 1 cooldown — {max(1, int(remaining.total_seconds() / 60))}m remaining"
             return True, f"Tier 1 publish now [{entry.score:.1f}]"
 
+        if self.has_actionable_tier1(now):
+            return False, "Tier 1 priority — waiting for eligible high-impact stories"
+
         if entry.score < SCORE_SCHEDULE:
             return False, f"Score {entry.score:.1f} is below Tier 2 floor {SCORE_SCHEDULE:.0f}"
         if self.tier2_published_count() >= TIER2_DAILY_LIMIT:
@@ -387,6 +392,31 @@ class PostingQueue:
         if not self._is_top_schedule_story(entry):
             return False, "Waiting behind a higher-scoring Tier 2 story"
         return True, f"Tier 2 next slot [{entry.score:.1f}]"
+
+    def has_actionable_tier1(self, now: Optional[datetime] = None) -> bool:
+        """Return whether a fresh Tier 1 entry is ready for this worker run."""
+        now = now or datetime.now(timezone.utc)
+        ttl = LANE_TTL[Route.PUBLISH_NOW.value]
+        for candidate in self._entries:
+            if candidate.status != "QUEUED" or candidate.route_enum != Route.PUBLISH_NOW:
+                continue
+            try:
+                if candidate.age(now) > ttl:
+                    continue
+            except (TypeError, ValueError):
+                # Invalid legacy timestamps require normal publisher review;
+                # do not allow Tier 2 to jump ahead of them.
+                return True
+            if candidate.next_retry_at:
+                try:
+                    if datetime.fromisoformat(candidate.next_retry_at) > now:
+                        continue
+                except ValueError:
+                    # A malformed retry timestamp must not silently remove a
+                    # high-impact story from priority handling.
+                    return True
+            return True
+        return False
 
     def next_publishable(
         self,
@@ -437,9 +467,14 @@ class PostingQueue:
             self._save()
         return changed
 
-    def mark_published(self, entry: QueueEntry, post_id: Optional[str] = None) -> None:
+    def mark_published(
+        self,
+        entry: QueueEntry,
+        post_id: Optional[str] = None,
+        published_at: Optional[str] = None,
+    ) -> None:
         entry.status       = "PUBLISHED"
-        entry.published_at = datetime.now(timezone.utc).isoformat()
+        entry.published_at = published_at or datetime.now(timezone.utc).isoformat()
         entry.facebook_post_id = post_id
         entry.next_retry_at = None
         entry.last_publish_error = ""
@@ -462,7 +497,8 @@ class PostingQueue:
     ) -> None:
         """Record an immediate post as history without first queueing it."""
         entry = next(
-            (item for item in self._entries if item.source_url == story.source_url),
+            (item for item in self._entries
+             if canonical_story_url(item.source_url) == canonical_story_url(story.source_url)),
             None,
         )
         if entry is None:
@@ -553,7 +589,11 @@ class PostingQueue:
         impact_reasons: Optional[list] = None,
     ) -> bool:
         """Safely demote or hold a queued candidate when fresh scoring weakens it."""
-        entry = next((e for e in self._entries if e.source_url == story.source_url and e.status == "QUEUED"), None)
+        entry = next((
+            e for e in self._entries
+            if canonical_story_url(e.source_url) == canonical_story_url(story.source_url)
+            and e.status == "QUEUED"
+        ), None)
         if entry is None:
             return False
         previous_route = entry.route
@@ -850,11 +890,16 @@ class PostingQueue:
 
     def _is_top_schedule_story(self, entry: QueueEntry) -> bool:
         """Return whether entry is the globally highest-scoring regular story."""
+        now = datetime.now(timezone.utc)
         regular = [
             e for e in self._entries
             if e.status == "QUEUED"
             and e.route_enum != Route.PUBLISH_NOW
             and e.score >= SCORE_SCHEDULE
+            and (
+                not e.next_retry_at
+                or datetime.fromisoformat(e.next_retry_at) <= now
+            )
         ]
         if not regular:
             return True

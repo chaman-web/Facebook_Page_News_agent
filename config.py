@@ -87,7 +87,8 @@ RSS_FALLBACK_FEEDS = [
 # Tunable parameters
 # ---------------------------------------------------------------------------
 
-NEWS_MAX_AGE_HOURS: int = int(_optional("NEWS_MAX_AGE_HOURS", "48"))
+# Operators may tighten this window, but stories can never be older than 48h.
+NEWS_MAX_AGE_HOURS: int = min(48, max(1, int(_optional("NEWS_MAX_AGE_HOURS", "48"))))
 NEWS_MIN_SOURCES: int = int(_optional("NEWS_MIN_SOURCES", "2"))
 
 # Runtime paths
@@ -100,6 +101,7 @@ SOURCE_HEALTH_PATH = PROJECT_ROOT / "source_health.json"
 SCORE_LOG_PATH = PROJECT_ROOT / "score_log.jsonl"
 RUN_LOG_PATH = PROJECT_ROOT / "run_log.jsonl"
 ENGAGEMENT_METRICS_PATH = PROJECT_ROOT / "engagement_metrics.jsonl"
+PUBLISH_RECEIPTS_PATH = PROJECT_ROOT / "publish_receipts.jsonl"
 HIGH_VALUE_BACKLOG_PATH = PROJECT_ROOT / "high_value_backlog.json"
 IMAGES_DIR = PROJECT_ROOT / "images"
 LOGS_DIR = PROJECT_ROOT / "logs"

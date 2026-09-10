@@ -48,8 +48,16 @@ def check_generated_facts(story: Story, post: str) -> FactCheckResult:
     evidence_norm = _normalise(evidence)
     issues: list[str] = []
 
+    # Publisher names are attribution metadata, not factual claims. Some RSS
+    # feeds include counters in their title (for example, "Records Found 1000").
+    # Keep those source labels visible without treating their numbers as claims.
+    claim_lines = [
+        line for line in post.splitlines()
+        if not line.strip().lower().startswith(("sources:", "📰 sources:"))
+    ]
+    claim_text = "\n".join(claim_lines)
     evidence_numbers = {_normalise(value) for value in _NUMBER.findall(evidence)}
-    for value in _NUMBER.findall(post):
+    for value in _NUMBER.findall(claim_text):
         normal = _normalise(value)
         # Decorative list numbering and the page name are not factual claims.
         if normal and normal not in evidence_numbers:

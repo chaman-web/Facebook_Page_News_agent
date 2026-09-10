@@ -46,7 +46,12 @@ class FinalQualityError(Exception):
     """Raised when a post fails a hard final quality check."""
 
 
-def final_quality_check(story: Story, image_path: Path | None = None) -> None:
+def final_quality_check(
+    story: Story,
+    image_path: Path | None = None,
+    *,
+    remember: bool = True,
+) -> None:
     """
     Run final quality checks before publishing.
     Hard failures raise FinalQualityError.
@@ -97,6 +102,14 @@ def final_quality_check(story: Story, image_path: Path | None = None) -> None:
 
     # ── All hard checks passed ───────────────────────────────────────────────
     logger.info("✅ Final quality check passed.")
+    if remember:
+        remember_post(post)
+
+
+def remember_post(post: str) -> None:
+    """Remember content only after the caller knows delivery succeeded."""
+    if not post:
+        return
     _RECENT_POSTS.append(post)
     if len(_RECENT_POSTS) > _MAX_RECENT:
         _RECENT_POSTS.pop(0)

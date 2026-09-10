@@ -10,6 +10,7 @@ env/
 drafts/
 seen_stories.json
 engagement_metrics.jsonl
+publish_receipts.jsonl
 high_value_backlog.json
 .feed_cache/
 .runtime-backups/
