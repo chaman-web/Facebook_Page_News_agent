@@ -472,6 +472,14 @@ def fetch_regional_news(
         selected.extend(chosen)
         coverage[region] = len(chosen)
 
+        if len(chosen) < limit_per_region:
+            logger.warning(
+                "REGIONAL COVERAGE ALERT: %s returned %d/%d expected candidates.",
+                region,
+                len(chosen),
+                limit_per_region,
+            )
+
     logger.info(
         "Regional discovery added %d candidates: %s",
         len(selected),

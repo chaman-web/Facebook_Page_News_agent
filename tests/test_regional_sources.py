@@ -6,6 +6,7 @@ from unittest.mock import patch
 from news.fetcher import fetch_regional_news
 from news.regional_sources import (
     REGIONAL_FEEDS,
+    assess_regional_impact,
     discovery_priority,
     is_high_impact_candidate,
     is_region_relevant,
@@ -37,6 +38,41 @@ def test_story_carries_region_without_changing_default_behavior():
     assert story.region == "global"
     story.region = "pakistan"
     assert story.region == "pakistan"
+
+
+def test_major_regional_consequences_are_measured_across_dimensions():
+    story = _story(
+        "Pakistan declares nationwide state of emergency after blackout disrupts hospitals",
+        2,
+    )
+    story.region = "pakistan"
+
+    impact = assess_regional_impact(story)
+
+    assert impact.is_major
+    assert impact.score >= 8
+    assert {"emergency-response", "essential-services", "national-reach"} <= set(impact.reasons)
+
+
+def test_global_story_does_not_receive_regional_impact_bonus():
+    story = _story(
+        "Nationwide state of emergency after blackout disrupts hospitals",
+        2,
+    )
+
+    impact = assess_regional_impact(story)
+
+    assert impact.score == 0
+    assert impact.reasons == ()
+
+
+def test_multilingual_regional_signals_protect_local_candidate():
+    story = _story("پاکستان میں ہنگامی حالت، بجلی بند", 2)
+    story.region = "pakistan"
+
+    assert is_region_relevant(story, "pakistan")
+    assert assess_regional_impact(story).is_major
+    assert is_high_impact_candidate(story)
 
 
 def test_regional_relevance_rejects_global_story_from_local_publisher():

@@ -60,3 +60,31 @@ def test_shadow_reduces_keyword_authority_without_losing_high_impact_floor():
     assert score.impact_score >= 10
     assert score.shadow_total >= 82
     assert score.shadow_tier in {EditorialTier.HIGH, EditorialTier.PRIORITY}
+
+
+def test_major_regional_story_reaches_existing_tier_one_route():
+    story = _story(
+        "Pakistan declares nationwide state of emergency",
+        "A nationwide blackout disrupted hospitals and essential services.",
+    )
+    story.region = "pakistan"
+
+    score = score_story(story)
+
+    assert score.regional_impact_score >= 8
+    assert score.impact_score >= 10
+    assert score.total >= 82
+    assert score.effective_tier_num == 1
+
+
+def test_same_text_keeps_global_story_scoring_free_of_regional_bonus():
+    story = _story(
+        "Nationwide state of emergency declared",
+        "A nationwide blackout disrupted hospitals and essential services.",
+    )
+
+    score = score_story(story)
+
+    assert score.regional_impact_score == 0
+    assert score.regional_impact_reasons == ()
+    assert "Regional impact" not in score.reason

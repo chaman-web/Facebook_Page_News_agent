@@ -73,6 +73,7 @@ from models import (
     VerificationStatus,
 )
 from news.fetcher import CATEGORIES, fetch_all_categories, fetch_news
+from news.regional_sources import assess_regional_impact
 from output.draft_writer import save_draft
 from pipeline.content_validator import ContentValidationError, validate_post
 from pipeline.deduplicator import check_published_duplicate, filter_fresh_stories, mark_seen
@@ -198,6 +199,7 @@ def fetch_and_build(
         "high_impact_protected": 0,
         "high_impact_build_failures": 0,
         "high_impact_missed": 0,
+        "regional_candidates_protected": 0,
     }
     high_impact_urls: set[str] = set()
     accounted_high_impact_urls: set[str] = set()
@@ -297,6 +299,18 @@ def fetch_and_build(
             dnp_passed.append(story)
         elif verdict.decision == DNPDecision.HOLD:
             dnp_held.append((story, verdict.reason))
+            regional_impact = assess_regional_impact(story)
+            if regional_impact.is_major:
+                story.priority_protected = True
+                if not dry_run:
+                    remember(story, 0.0, 10.0)
+                metrics["regional_candidates_protected"] += 1
+                logger.info(
+                    "Regional candidate protected for recheck [%.0f/10]: %s | %s",
+                    regional_impact.score,
+                    story.title[:70],
+                    verdict.reason,
+                )
         else:
             dnp_rejected += 1
     logger.info("DNP gate: %d passed | %d held | %d rejected.", len(dnp_passed), len(dnp_held), dnp_rejected)
