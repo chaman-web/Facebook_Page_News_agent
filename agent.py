@@ -65,6 +65,7 @@ import config  # noqa: F401 — validates API keys on import
 
 from models import (
     DraftStatus,
+    DuplicateStory,
     GenerationError,
     NewsSourceError,
     Story,
@@ -74,7 +75,7 @@ from models import (
 from news.fetcher import CATEGORIES, fetch_all_categories, fetch_news
 from output.draft_writer import save_draft
 from pipeline.content_validator import ContentValidationError, validate_post
-from pipeline.deduplicator import filter_fresh_stories, mark_seen
+from pipeline.deduplicator import check_published_duplicate, filter_fresh_stories, mark_seen
 from pipeline.do_not_publish import DNPDecision, check_do_not_publish, record_published_title
 from pipeline.editorial_scorer import EditorialTier, score_and_filter, score_story
 from pipeline.final_quality_check import FinalQualityError, final_quality_check, remember_post
@@ -637,6 +638,7 @@ def fetch_and_build(
             post_id: str | None = None
             receipt_saved = False
             try:
+                _assert_not_delivered(story)
                 _wait_for_immediate_spacing(last_direct_publish_at)
                 post_id = publish_post_with_image(story, Path(image_path))
                 try:
@@ -659,6 +661,9 @@ def fetch_and_build(
                 direct_published += 1
                 last_direct_publish_at = datetime.now(timezone.utc)
                 logger.info("✅ Published immediately [%.1f]: %s", escore.total, story.title[:60])
+            except DuplicateStory as exc:
+                logger.warning("Duplicate delivery prevented before Facebook: %s | %s", story.title[:60], exc)
+                resolve(story.source_url)
             except Exception as exc:
                 if post_id:
                     if receipt_saved:
@@ -782,6 +787,17 @@ def _wait_for_immediate_spacing(
     logger.info("High-impact spacing active — waiting %.0f seconds before the next post.", remaining)
     time.sleep(remaining)
     return remaining
+
+
+def _assert_not_delivered(story: Story) -> None:
+    """Final persistent duplicate guard before a Facebook API delivery."""
+    check_published_duplicate(story)
+    from pipeline.publish_receipts import find_publish_receipt
+    receipt = find_publish_receipt(story.source_url)
+    if receipt:
+        raise DuplicateStory(
+            f"Facebook delivery receipt already exists: {receipt.get('post_id', 'unknown')}"
+        )
 
 
 def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
@@ -966,6 +982,14 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.warning("📝 Review required — %s | %s", entry.title[:60], reason)
             queue.mark_review_required(entry, reason)
             metrics["review_required"] += 1
+            continue
+
+        try:
+            _assert_not_delivered(story)
+        except DuplicateStory as exc:
+            logger.warning("Duplicate delivery prevented before Facebook: %s | %s", entry.title[:60], exc)
+            queue.mark_skipped(entry, f"duplicate delivery prevented: {exc}")
+            metrics["duplicates_prevented"] = metrics.get("duplicates_prevented", 0) + 1
             continue
 
         try:

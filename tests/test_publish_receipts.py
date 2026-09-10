@@ -3,6 +3,7 @@ from unittest.mock import Mock
 
 from pipeline.posting_queue import QueueEntry
 from pipeline.publish_receipts import (
+    find_publish_receipt,
     load_publish_receipts,
     reconcile_publish_receipts,
     record_publish_receipt,
@@ -43,8 +44,26 @@ def test_malformed_receipt_line_is_ignored(tmp_path):
     )
 
     assert load_publish_receipts(path) == {
-        "https://good.test": {
+        "https://good.test/": {
             "source_url": "https://good.test",
             "post_id": "post_9",
         }
     }
+
+
+def test_receipt_matches_tracking_url_variant(tmp_path):
+    path = tmp_path / "receipts.jsonl"
+    record_publish_receipt(
+        "http://www.example.com/news/story?utm_source=facebook",
+        "Delivered story",
+        "post_10",
+        path=path,
+    )
+
+    receipt = find_publish_receipt(
+        "https://example.com/news/story?fbclid=tracking",
+        path=path,
+    )
+
+    assert receipt is not None
+    assert receipt["post_id"] == "post_10"

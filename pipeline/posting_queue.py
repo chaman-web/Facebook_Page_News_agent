@@ -23,6 +23,7 @@ from typing import Optional
 
 import config
 from models import Story, VerificationStatus
+from pipeline.deduplicator import canonical_story_url
 from pipeline.editorial_scorer import CATEGORY_TIERS
 
 logger = logging.getLogger(__name__)
@@ -260,7 +261,8 @@ class PostingQueue:
         # automatic Tier 2 -> Tier 1 promotion after new corroboration.
         existing = next(
             (entry for entry in self._entries
-             if entry.source_url == story.source_url and entry.status in {"QUEUED", "REVIEW_REQUIRED"}),
+             if canonical_story_url(entry.source_url) == canonical_story_url(story.source_url)
+             and entry.status in {"QUEUED", "REVIEW_REQUIRED"}),
             None,
         )
         if existing is not None:
@@ -495,7 +497,8 @@ class PostingQueue:
     ) -> None:
         """Record an immediate post as history without first queueing it."""
         entry = next(
-            (item for item in self._entries if item.source_url == story.source_url),
+            (item for item in self._entries
+             if canonical_story_url(item.source_url) == canonical_story_url(story.source_url)),
             None,
         )
         if entry is None:
@@ -586,7 +589,11 @@ class PostingQueue:
         impact_reasons: Optional[list] = None,
     ) -> bool:
         """Safely demote or hold a queued candidate when fresh scoring weakens it."""
-        entry = next((e for e in self._entries if e.source_url == story.source_url and e.status == "QUEUED"), None)
+        entry = next((
+            e for e in self._entries
+            if canonical_story_url(e.source_url) == canonical_story_url(story.source_url)
+            and e.status == "QUEUED"
+        ), None)
         if entry is None:
             return False
         previous_route = entry.route

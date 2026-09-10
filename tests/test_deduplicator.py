@@ -19,7 +19,12 @@ os.environ.setdefault("NEWSAPI_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-key")
 
 from models import DuplicateStory, Story  # noqa: E402
-from pipeline.deduplicator import check_duplicate, filter_fresh_stories, mark_seen  # noqa: E402
+from pipeline.deduplicator import (  # noqa: E402
+    canonical_story_url,
+    check_duplicate,
+    filter_fresh_stories,
+    mark_seen,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +59,17 @@ class TestCheckDuplicate:
             {"urls": ["https://example.com/story-1"], "titles": ["Some Story"]},
         )
         story = _story("New Story", "https://example.com/story-1")
+
+        with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+            with pytest.raises(DuplicateStory, match="Duplicate URL"):
+                check_duplicate(story)
+
+    def test_tracking_and_scheme_url_variant_raises(self, tmp_path):
+        seen_path = _write_seen(
+            tmp_path,
+            {"urls": ["http://www.example.com/story-1?utm_source=facebook"], "titles": []},
+        )
+        story = _story("Same report from another link", "https://example.com/story-1?fbclid=abc")
 
         with patch("config.SEEN_STORIES_PATH", str(seen_path)):
             with pytest.raises(DuplicateStory, match="Duplicate URL"):
@@ -150,3 +166,43 @@ def test_batch_dedup_reads_and_writes_state_once(tmp_path):
     assert len(fresh) == 10
     assert duplicates == 0
     assert save.call_count == 1
+
+
+def test_batch_dedup_blocks_same_story_from_two_sources(tmp_path):
+    seen_path = _write_seen(
+        tmp_path,
+        {"urls": [], "titles": [], "url_attempts": {}, "title_attempts": {}},
+    )
+    stories = [
+        _story("Major earthquake strikes coastal region", "https://one.example/report"),
+        _story("Major earthquake strikes coastal region", "https://two.example/report"),
+    ]
+
+    with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+        fresh, duplicates = filter_fresh_stories(stories)
+
+    assert [story.source_url for story in fresh] == ["https://one.example/report"]
+    assert duplicates == 1
+
+
+def test_batch_dedup_blocks_tracking_variant_with_different_title(tmp_path):
+    seen_path = _write_seen(
+        tmp_path,
+        {"urls": [], "titles": [], "url_attempts": {}, "title_attempts": {}},
+    )
+    stories = [
+        _story("Original report headline", "http://www.example.com/report?utm_source=rss"),
+        _story("Publisher rewrites its headline", "https://example.com/report?fbclid=abc"),
+    ]
+
+    with patch("config.SEEN_STORIES_PATH", str(seen_path)):
+        fresh, duplicates = filter_fresh_stories(stories)
+
+    assert [story.title for story in fresh] == ["Original report headline"]
+    assert duplicates == 1
+
+
+def test_canonical_story_url_removes_only_delivery_tracking_noise():
+    assert canonical_story_url(
+        "http://www.Example.com/news/item/?id=7&utm_medium=social&fbclid=abc#comments"
+    ) == "https://example.com/news/item?id=7"
