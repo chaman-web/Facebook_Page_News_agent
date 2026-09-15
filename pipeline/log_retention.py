@@ -85,3 +85,35 @@ def prune_rotated_logs(
             candidate.unlink()
             removed += 1
     return removed
+
+
+def clean_pipeline_logs(logs_dir=None) -> dict:
+    """
+    Prune all pipeline log files to the 2-day retention window.
+    Called once at the start of each job run.
+
+    Returns a dict of {filename: lines_removed}.
+    """
+    from pathlib import Path
+    import config as _config
+
+    target = Path(logs_dir) if logs_dir else _config.LOGS_DIR
+    target.mkdir(parents=True, exist_ok=True)
+
+    log_files = [
+        "job1_fetch.log",
+        "job1_errors.log",
+        "job2_publish.log",
+        "job2_errors.log",
+        "errors.log",
+    ]
+
+    results = {}
+    for name in log_files:
+        path = target / name
+        removed = prune_log_file(path)
+        prune_rotated_logs(path)
+        if removed:
+            results[name] = removed
+
+    return results

@@ -6,7 +6,22 @@ $logsDir    = "$projectDir\logs"
 # Create logs folder if not exists
 if (-not (Test-Path $logsDir)) { New-Item -ItemType Directory -Path $logsDir }
 
-# --- Job 1: Fetch & Build — every 4 hours (PKT times) ---
+# --- FIX 1: Enable wake timers (AC and DC) ---
+Write-Host "Enabling wake timers (AC and DC)..."
+powercfg /setacvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_SLEEP RTCWAKE 1
+powercfg /setactive SCHEME_CURRENT
+Write-Host "OK Wake timers enabled"
+
+# --- FIX 2: Set DC (battery) sleep to 30 min so machine sleeps lightly ---
+# Prevents deep hibernate on battery which blocks wake timers
+Write-Host "Setting battery sleep timeout to 30 minutes..."
+powercfg /setdcvalueindex SCHEME_CURRENT SUB_SLEEP STANDBYIDLE 1800
+powercfg /setactive SCHEME_CURRENT
+Write-Host "OK Battery sleep timeout set"
+
+
+# --- Job 1: Fetch & Build - every 4 hours (PKT times) ---
 $action1 = New-ScheduledTaskAction `
     -Execute (Join-Path $projectDir "run_job1_fetch.bat") `
     -WorkingDirectory $projectDir
@@ -21,10 +36,15 @@ $trigger1 = @(
 )
 
 $settings1 = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 2) `
     -StartWhenAvailable `
     -RunOnlyIfNetworkAvailable `
-    -MultipleInstances IgnoreNew
+    -MultipleInstances IgnoreNew `
+    -WakeToRun
+
+# FIX 6: Restart up to 3 times on crash, 5 min apart
+$settings1.RestartCount    = 3
+$settings1.RestartInterval = "PT5M"
 
 Register-ScheduledTask `
     -TaskName "GlobalPulseNews_Job1_Fetch" `
@@ -37,14 +57,11 @@ Register-ScheduledTask `
 
 Write-Host "OK Job 1 registered - every 4 hours"
 
-# --- Job 2: Publish — enabled only while verified queue work exists ---
+# --- Job 2: Publish - enabled only while verified queue work exists ---
 $action2 = New-ScheduledTaskAction `
     -Execute (Join-Path $projectDir "run_job2_publish.bat") `
     -WorkingDirectory $projectDir
 
-# This trigger is a recovery fallback while the task is enabled. The task
-# disables itself as soon as both verified tiers are empty. Job 1 re-enables
-# and starts it only after verified work enters the queue.
 $trigger2 = New-ScheduledTaskTrigger `
     -Once `
     -At (Get-Date).AddMinutes(1) `
@@ -52,11 +69,16 @@ $trigger2 = New-ScheduledTaskTrigger `
     -RepetitionDuration (New-TimeSpan -Days 3650)
 
 $settings2 = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 30) `
+    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
     -StartWhenAvailable `
     -AllowStartIfOnBatteries `
     -DontStopIfGoingOnBatteries `
-    -MultipleInstances IgnoreNew
+    -MultipleInstances IgnoreNew `
+    -WakeToRun
+
+# FIX 6: Restart up to 3 times on crash, 5 min apart
+$settings2.RestartCount    = 3
+$settings2.RestartInterval = "PT5M"
 
 Register-ScheduledTask `
     -TaskName "GlobalPulseNews_Job2_Publish" `
@@ -75,5 +97,6 @@ Unregister-ScheduledTask `
     -TaskName "GlobalPulseNews_Job2_Publish_10Min" `
     -Confirm:$false `
     -ErrorAction SilentlyContinue
+
 Write-Host ""
 Write-Host "Done. Open taskschd.msc to verify."

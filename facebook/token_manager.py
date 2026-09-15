@@ -114,26 +114,47 @@ class TokenManager:
         return token
 
     def _debug_token(self, token: str) -> dict:
-        """Call Graph API /debug_token to inspect token validity."""
-        try:
-            # Use the token to inspect itself if no app credentials
-            if config.FACEBOOK_APP_ID and config.FACEBOOK_APP_SECRET:
-                access_token = f"{config.FACEBOOK_APP_ID}|{config.FACEBOOK_APP_SECRET}"
-            else:
-                access_token = token
+        """Call Graph API /debug_token to inspect token validity.
 
-            response = requests.get(
-                f"{GRAPH_API_URL}/debug_token",
-                params={"input_token": token, "access_token": access_token},
-                timeout=10,
-            )
-            response.raise_for_status()
-            data = response.json()
-            return data.get("data", {})
-        except requests.RequestException as exc:
-            logger.warning("Token debug request failed: %s", exc)
-            # If we can't verify, assume valid and let the publish attempt reveal errors
-            return {"is_valid": True, "expires_at": 0}
+        Retries up to 3 times on transient network errors (DNS not ready after
+        wake from sleep). Non-network errors (4xx/5xx) skip retries.
+        """
+        import time as _time
+        _retry_count = 3
+        _retry_delay = 10
+        if config.FACEBOOK_APP_ID and config.FACEBOOK_APP_SECRET:
+            access_token = f"{config.FACEBOOK_APP_ID}|{config.FACEBOOK_APP_SECRET}"
+        else:
+            access_token = token
+
+        last_exc = None
+        for attempt in range(1, _retry_count + 1):
+            try:
+                response = requests.get(
+                    f"{GRAPH_API_URL}/debug_token",
+                    params={"input_token": token, "access_token": access_token},
+                    timeout=15,
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get("data", {})
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                last_exc = exc
+                if attempt < _retry_count:
+                    logger.warning(
+                        "Token debug network error (attempt %d/%d) \u2014 retrying in %ds: %s",
+                        attempt, _retry_count, _retry_delay, exc,
+                    )
+                    _time.sleep(_retry_delay)
+            except requests.RequestException as exc:
+                logger.warning("Token debug request failed (non-network): %s", exc)
+                return {"is_valid": True, "expires_at": 0}
+
+        logger.warning(
+            "Token debug failed after %d attempts (network error: %s) \u2014 assuming valid.",
+            _retry_count, last_exc,
+        )
+        return {"is_valid": True, "expires_at": 0}
 
     def _exchange_for_long_lived(self, short_token: str) -> str:
         """Exchange a short-lived token for a long-lived one (~60 days)."""

@@ -2,3 +2,6 @@ openai>=1.30.0
 requests>=2.31.0
 python-dotenv>=1.0.0
 feedparser>=6.0.0
+Pillow==11.3.0
+numpy==2.2.6
+schedule>=1.2.0

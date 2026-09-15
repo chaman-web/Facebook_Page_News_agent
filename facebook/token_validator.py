@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timezone
 
 import requests
@@ -22,8 +23,37 @@ import config
 logger = logging.getLogger(__name__)
 
 GRAPH_API_URL = f"https://graph.facebook.com/{config.FACEBOOK_GRAPH_API_VERSION}"
-_VALIDATION_TIMEOUT = 6   # seconds — fast fail, don't block the run
+_VALIDATION_TIMEOUT = 15  # seconds — increased from 6 to handle slow DNS after wake
 _REQUIRED_SCOPES = {"pages_manage_posts"}
+
+# Retry config for transient network errors (DNS not ready after wake from sleep)
+_NETWORK_RETRY_COUNT = 3
+_NETWORK_RETRY_DELAY = 10  # seconds between retries
+
+
+def _get_with_retry(url: str, params: dict, timeout: int) -> requests.Response:
+    """GET with retries for transient network errors (DNS failure, connection reset)."""
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt in range(1, _NETWORK_RETRY_COUNT + 1):
+        try:
+            return requests.get(url, params=params, timeout=timeout)
+        except requests.ConnectionError as exc:
+            last_exc = exc
+            if attempt < _NETWORK_RETRY_COUNT:
+                logger.warning(
+                    "Network error on attempt %d/%d — retrying in %ds: %s",
+                    attempt, _NETWORK_RETRY_COUNT, _NETWORK_RETRY_DELAY, exc,
+                )
+                time.sleep(_NETWORK_RETRY_DELAY)
+        except requests.Timeout as exc:
+            last_exc = exc
+            if attempt < _NETWORK_RETRY_COUNT:
+                logger.warning(
+                    "Timeout on attempt %d/%d — retrying in %ds",
+                    attempt, _NETWORK_RETRY_COUNT, _NETWORK_RETRY_DELAY,
+                )
+                time.sleep(_NETWORK_RETRY_DELAY)
+    raise last_exc
 
 
 def _fail(message: str, exit_on_failure: bool) -> bool:
@@ -59,7 +89,7 @@ def validate_token_or_exit(exit_on_failure: bool = True) -> bool:
             if config.FACEBOOK_APP_ID and config.FACEBOOK_APP_SECRET
             else token
         )
-        debug_response = requests.get(
+        debug_response = _get_with_retry(
             f"{GRAPH_API_URL}/debug_token",
             params={"input_token": token, "access_token": app_access_token},
             timeout=_VALIDATION_TIMEOUT,
@@ -107,7 +137,7 @@ def validate_token_or_exit(exit_on_failure: bool = True) -> bool:
             if value and value <= now_ts:
                 return _fail(f"Facebook {label} has expired.", exit_on_failure)
 
-        page_response = requests.get(
+        page_response = _get_with_retry(
             f"{GRAPH_API_URL}/{config.FACEBOOK_PAGE_ID}",
             params={
                 "fields": "id,name,is_published,can_post",

@@ -28,6 +28,7 @@ MIN_INDEPENDENT_SOURCES = max(2, int(config.NEWS_MIN_SOURCES))
 MAX_DEEP_CORROBORATORS = 2
 
 
+
 def verify_story(story: Story, deep: bool = False) -> Story:
     """Verify source independence and agreement, optionally reading source pages."""
     domain = canonical_domain(story.source_url)

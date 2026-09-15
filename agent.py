@@ -87,7 +87,7 @@ from pipeline.editorial_scorer import (
 from pipeline.final_quality_check import FinalQualityError, final_quality_check, remember_post
 from pipeline.generator import generate_post, reset_generation_backend_state
 from pipeline.high_value_backlog import pending_stories, remember, resolve
-from pipeline.log_retention import retained_log_handler
+from pipeline.log_retention import retained_log_handler, clean_pipeline_logs
 from pipeline.meta_policy_gate import (
     PolicyDecision,
     apply_policy_verdict,
@@ -102,6 +102,7 @@ from pipeline.posting_queue import (
     Route,
 )
 from pipeline.process_lock import PipelineBusy, pipeline_lock
+from pipeline.error_log import write_error
 from pipeline.clusterer import cluster_stories
 from pipeline.verifier import set_rss_pool, verify_story
 
@@ -186,6 +187,10 @@ def fetch_and_build(
     Nothing is published here.
     """
     reset_generation_backend_state()
+    # Dry runs must not mutate retained operational logs.
+    cleaned = {} if dry_run else clean_pipeline_logs()
+    if cleaned:
+        logger.info("Log cleanup: %s", " | ".join(f"{k}: {v} lines removed" for k, v in cleaned.items()))
     queue = PostingQueue()
     if dry_run:
         # All queue cleanup and reconciliation below must remain in-memory.
@@ -276,6 +281,22 @@ def fetch_and_build(
     queue.purge_old(max_age_hours=config.NEWS_MAX_AGE_HOURS)
 
     # ==========================================================================
+    # STAGE 0b — RE-VERIFY SINGLE-SOURCE DRAFTS
+    # Re-check DRAFT stories from previous runs against the current RSS pool.
+    # Any that now have 2+ independent sources are returned for rebuild + queue.
+    # ==========================================================================
+    if not dry_run:
+        from pipeline.draft_reverifier import reverify_drafts
+        promoted_drafts = reverify_drafts()
+        if promoted_drafts:
+            logger.info(
+                "✅ %d previously single-source draft(s) now verified — re-entering pipeline.",
+                len(promoted_drafts),
+            )
+    else:
+        promoted_drafts = []
+
+    # ==========================================================================
     # STAGE 1 — FETCH NEWS
     # ==========================================================================
     logger.info("── STAGE 1: Fetch News ─────────────────────────")
@@ -289,11 +310,27 @@ def fetch_and_build(
             raw_stories = fetch_news(limit=max(count * 10, 30), category=category)
     except NewsSourceError as exc:
         logger.error("Could not fetch news: %s", exc)
+        write_error(exc, job="fetch", stage="Stage 1 — Fetch News", run_id=RUN_ID)
         return finish("failed", 1)
 
     if not raw_stories:
         logger.warning("No stories returned from news sources.")
         return finish("empty", 0)
+
+
+
+    logger.info("Fetched %d candidate stories total.", len(raw_stories))
+    metrics["fetched"] = len(raw_stories)
+
+    # Merge promoted drafts into raw_stories so they flow through the full
+    # pipeline (clustering → dedup → policy → scoring → generation → queue).
+    # The deduplicator will silently drop any that were already published.
+    if promoted_drafts:
+        raw_stories = list(raw_stories) + promoted_drafts
+        logger.info(
+            "Added %d promoted draft(s) to the candidate pool.",
+            len(promoted_drafts),
+        )
 
     pending = pending_stories()
     if pending:
@@ -302,15 +339,13 @@ def fetch_and_build(
         raw_stories.extend(story for story in pending if story.source_url not in raw_urls)
         logger.info("Restored %d protected high-value candidate(s).", len(pending))
 
-    # A queued URL may gain corroboration or impact on a later fetch. Let it
-    # re-enter scoring so its lane and queue position can be refreshed.
+    # Let queued stories re-enter scoring so improved evidence can refresh
+    # their lane and priority without weakening duplicate protection.
     queued_urls = {entry.source_url for entry in queue._entries if entry.status == "QUEUED"}
     for story in raw_stories:
         if story.source_url in queued_urls:
             story.priority_protected = True
 
-    logger.info("Fetched %d candidate stories total.", len(raw_stories))
-    metrics["fetched"] = len(raw_stories)
     set_rss_pool(raw_stories)
 
     # ==========================================================================
@@ -334,10 +369,12 @@ def fetch_and_build(
             "High-impact candidate entered the normal pipeline.",
         )
 
+
     # ==========================================================================
     # STAGE 2 — REMOVE DUPLICATES
     # ==========================================================================
     logger.info("── STAGE 2: Remove Duplicates ──────────────────")
+
     def audit_duplicate(story: Story, reason: str) -> None:
         if story.source_url not in high_impact_urls:
             return
@@ -377,13 +414,6 @@ def fetch_and_build(
             if protect_for_rescue(story, "content_hold", verdict.reason):
                 if regional_impact.is_major:
                     metrics["regional_candidates_protected"] += 1
-            if regional_impact.is_major:
-                logger.info(
-                    "Regional candidate protected for recheck [%.0f/10]: %s | %s",
-                    regional_impact.score,
-                    story.title[:70],
-                    verdict.reason,
-                )
         else:
             dnp_rejected += 1
             protect_for_rescue(story, "content_reject", verdict.reason)
@@ -532,9 +562,9 @@ def fetch_and_build(
 
     for escore, story in selected_scored:
         if dry_run and story.verification_status != VerificationStatus.VERIFIED:
+            accounted_high_impact_urls.add(story.source_url)
             review_drafts += 1
             metrics["review_drafts"] = review_drafts
-            accounted_high_impact_urls.add(story.source_url)
             logger.info(
                 "📝 [DRY RUN] Provisional review candidate [%.1f]: %s | %s",
                 escore.total, story.title[:60], story.verification_reason,
@@ -559,8 +589,7 @@ def fetch_and_build(
                 story = generate_post(story)
             except GenerationError as exc:
                 logger.error("Post generation failed for '%s': %s", story.title[:50], exc)
-                is_high_impact = story.source_url in high_impact_urls
-                if is_high_impact:
+                if story.source_url in high_impact_urls:
                     protect_for_rescue(story, "post_generation", str(exc))
                     metrics["high_impact_build_failures"] += 1
                     story.draft_status = DraftStatus.DRAFT
@@ -749,14 +778,46 @@ def fetch_and_build(
     scheduled_posts = [item for item in ready_posts if item not in immediate_posts]
 
     if dry_run:
-        logger.info("── DRY RUN: Pipeline preview ───────────────────")
-        for i, (escore, story, _) in enumerate(ready_posts, 1):
-            icon = "🔴" if escore.tier.value == "PRIORITY / BREAKING" else \
-                   "🟠" if escore.tier.value == "HIGH PRIORITY" else \
-                   "🟢" if escore.tier.value == "PUBLISH" else "🟡"
-            action = "PUBLISH IMMEDIATELY" if (escore.total >= 80 or escore.impact_score >= 10) else "NEXT SCHEDULE"
-            logger.info("%s [DRY RUN] %d. [%s | %.1f] %s [%s]",
-                icon, i, action, escore.total, story.title[:60], story.source_name)
+        tier1_posts = [(s, st) for s, st, _ in ready_posts if s.total >= 80 or s.impact_score >= 10]
+        tier2_posts = [(s, st) for s, st, _ in ready_posts if s.total < 80 and s.impact_score < 10]
+
+        logger.info("")
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+        logger.info("  DRY RUN — Queue Preview  (%d ready  |  %d provisional drafts)",
+                    len(ready_posts), review_drafts)
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+
+        logger.info("")
+        logger.info("  🔴  TIER 1 — PUBLISH IMMEDIATELY  (%d)", len(tier1_posts))
+        if tier1_posts:
+            logger.info("  %-4s  %-6s  %-14s  %s", "#", "Score", "Category", "Title  [Source]")
+            logger.info("  " + "─" * 70)
+            for i, (es, st) in enumerate(tier1_posts, 1):
+                logger.info("  %-4d  %-6.1f  %-14s  %s  [%s]",
+                    i, es.total, (getattr(st, "category", "") or "—").upper()[:14],
+                    st.title[:45], st.source_name[:20])
+        else:
+            logger.info("  (none)")
+
+        logger.info("")
+        logger.info("  🟡  TIER 2 — SCHEDULED  (%d)", len(tier2_posts))
+        if tier2_posts:
+            logger.info("  %-4s  %-6s  %-14s  %s", "#", "Score", "Category", "Title  [Source]")
+            logger.info("  " + "─" * 70)
+            for i, (es, st) in enumerate(tier2_posts, 1):
+                logger.info("  %-4d  %-6.1f  %-14s  %s  [%s]",
+                    i, es.total, (getattr(st, "category", "") or "—").upper()[:14],
+                    st.title[:45], st.source_name[:20])
+        else:
+            logger.info("  (none)")
+
+        if review_drafts:
+            logger.info("")
+            logger.info("  📝  PROVISIONAL DRAFTS — saved for review  (%d)", review_drafts)
+            logger.info("      (single-source stories — need 2+ sources to auto-publish)")
+
+        logger.info("")
+        logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
         return finish("dry_run", 0)
 
     direct_published = 0
@@ -941,6 +1002,10 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
     started_at = time.monotonic()
     from facebook.token_validator import validate_token_or_exit
     validate_token_or_exit(exit_on_failure=True)
+    # Clean old log entries at the start of each publish run
+    cleaned = clean_pipeline_logs()
+    if cleaned:
+        logger.info("Log cleanup: %s", " | ".join(f"{k}: {v} lines removed" for k, v in cleaned.items()))
 
     queue = PostingQueue()
     metrics = {
@@ -1177,6 +1242,8 @@ def publish_from_queue(force_now: bool = False, count: int = 0) -> int:
             logger.error("\n%s", exc)
             logger.error("❌ Fatal error — stopping. Refresh your token.\n"
                          "   Published %d post(s) before error.", published_count)
+            write_error(exc, job="publish", stage="Facebook API — Fatal publish error", run_id=RUN_ID,
+                        extra={"published_before_error": published_count})
             metrics["published"] = published_count
             metrics["failed"] = failed_count + 1
             return finish("failed", 1)
@@ -1302,15 +1369,32 @@ def main(
                 if entry.is_breaking:
                     last_breaking_at = simulated_at
 
-            logger.info("Would publish %d post(s) if the publish job ran now:", len(publishable))
-            for i, (entry, reason) in enumerate(publishable, 1):
-                logger.info(
-                    "  %d. [%.1f — %s] %s [%s] | %s",
-                    i, entry.score, entry.route, entry.title[:70], entry.source_name, reason,
-                )
-            logger.info("Would leave %d queued due to timing/editorial gates.", len(skipped))
-            for entry, reason in skipped:
-                logger.info("  HOLD: %s | %s", entry.title[:70], reason)
+            # ── Publish dry-run: clean Tier 1 / Tier 2 breakdown ──
+            pub_t1 = [(e, r) for e, r in publishable if e.route_enum == Route.PUBLISH_NOW]
+            pub_t2 = [(e, r) for e, r in publishable if e.route_enum != Route.PUBLISH_NOW]
+            hld_t1 = [(e, r) for e, r in skipped if e.route_enum == Route.PUBLISH_NOW]
+            hld_t2 = [(e, r) for e, r in skipped if e.route_enum != Route.PUBLISH_NOW]
+
+            logger.info("")
+            logger.info("  🔴  TIER 1 — would publish %d", len(pub_t1))
+            if pub_t1:
+                for i, (e, r) in enumerate(pub_t1, 1):
+                    logger.info("    %d. [%.1f] %s  [%s]  %s", i, e.score, e.title[:60], e.source_name, r)
+            if hld_t1:
+                logger.info("  🔴  TIER 1 — held %d", len(hld_t1))
+                for e, r in hld_t1:
+                    logger.info("    HOLD  %s | %s", e.title[:60], r)
+
+            logger.info("")
+            logger.info("  🟡  TIER 2 — would publish %d", len(pub_t2))
+            if pub_t2:
+                for i, (e, r) in enumerate(pub_t2, 1):
+                    logger.info("    %d. [%.1f] %s  [%s]  %s", i, e.score, e.title[:60], e.source_name, r)
+            if hld_t2:
+                logger.info("  🟡  TIER 2 — held %d (timing / gate)", len(hld_t2))
+                for e, r in hld_t2:
+                    logger.info("    HOLD  %s | %s", e.title[:60], r)
+            logger.info("")
             _write_run_summary(
                 "publish",
                 "dry_run",
@@ -1343,29 +1427,69 @@ def main(
 # ---------------------------------------------------------------------------
 
 def _print_queue_status(queue: PostingQueue) -> None:
-    today    = queue.daily_published_count()
-    queued   = queue.queued_count()
-    day_type = queue._classify_day()
+    from datetime import datetime, timezone
 
-    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    today       = queue.daily_published_count()
+    t1_pub      = queue.tier1_published_count()
+    t2_pub      = queue.tier2_published_count()
+    day_type    = queue._classify_day()
+    all_entries = [e for e in queue._entries if e.status == "QUEUED"]
+    all_entries.sort(key=queue.priority_key)
+
+    tier1 = [e for e in all_entries if e.route_enum == Route.PUBLISH_NOW]
+    tier2 = [e for e in all_entries if e.route_enum != Route.PUBLISH_NOW]
+
+    last_pub = queue.last_published_at()
+    now      = datetime.now(timezone.utc)
+
+    def _wait(e):
+        """Minutes until this entry is eligible to publish."""
+        if last_pub is None:
+            return 0
+        from pipeline.posting_queue import PUBLISH_NOW_MIN_GAP
+        elapsed = (now - last_pub).total_seconds()
+        remaining = PUBLISH_NOW_MIN_GAP.total_seconds() - elapsed
+        return max(0, int(remaining / 60))
+
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     logger.info("  Global Pulse News — Queue Status")
     logger.info("  Day type        : %s", day_type)
-    logger.info("  Published today : %d (Tier 1: %d; Tier 2: %d/%d)",
-                today, queue.tier1_published_count(), queue.tier2_published_count(), HARD_DAILY_CEILING)
-    logger.info("  Currently queued: %d stories", queued)
-    logger.info("  %s", queue.summary())
-    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+    logger.info("  Published today : %d total  (Tier 1: %d  |  Tier 2: %d / %d)",
+                today, t1_pub, t2_pub, HARD_DAILY_CEILING)
+    logger.info("  Queued          : %d total  (Tier 1: %d  |  Tier 2: %d)",
+                len(all_entries), len(tier1), len(tier2))
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
-    entries = [e for e in queue._entries if e.status == "QUEUED"]
-    if entries:
-        entries.sort(key=queue.priority_key)
-        for i, e in enumerate(entries[:10], 1):
-            tier_icon = "🔴" if e.route_enum == Route.PUBLISH_NOW else "🟡"
-            logger.info(
-                "  %s %d. [%s | %.1f] %-12s %s",
-                tier_icon, i, "TIER 1" if e.route_enum == Route.PUBLISH_NOW else "TIER 2", e.score,
-                e.category.upper()[:12], e.title[:60],
-            )
+    if tier1:
+        logger.info("")
+        logger.info("  🔴  TIER 1 — PUBLISH IMMEDIATELY  (unlimited / day)")
+        logger.info("  %-4s  %-6s  %-14s  %-10s  %s", "#", "Score", "Category", "Wait", "Title")
+        logger.info("  " + "─" * 72)
+        for i, e in enumerate(tier1, 1):
+            wait = _wait(e)
+            wait_str = f"{wait}m" if wait > 0 else "ready"
+            logger.info("  %-4d  %-6.1f  %-14s  %-10s  %s",
+                i, e.score, (e.category or "—").upper()[:14], wait_str, e.title[:50])
+    else:
+        logger.info("")
+        logger.info("  🔴  TIER 1 — empty")
+
+    if tier2:
+        logger.info("")
+        logger.info("  🟡  TIER 2 — SCHEDULED  (%d / %d published today)", t2_pub, HARD_DAILY_CEILING)
+        logger.info("  %-4s  %-6s  %-14s  %-10s  %s", "#", "Score", "Category", "Wait", "Title")
+        logger.info("  " + "─" * 72)
+        for i, e in enumerate(tier2, 1):
+            wait = _wait(e)
+            wait_str = f"{wait}m" if wait > 0 else "ready"
+            logger.info("  %-4d  %-6.1f  %-14s  %-10s  %s",
+                i, e.score, (e.category or "—").upper()[:14], wait_str, e.title[:50])
+    else:
+        logger.info("")
+        logger.info("  🟡  TIER 2 — empty")
+
+    logger.info("")
+    logger.info("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 
 
 # ---------------------------------------------------------------------------
@@ -1433,4 +1557,9 @@ Examples:
         except PipelineBusy as exc:
             logger.info("Pipeline job deferred: %s. The next scheduled run will retry.", exc)
             sys.exit(0)
+        except Exception as exc:
+            job_name = "fetch" if args.fetch else "publish"
+            write_error(exc, job=job_name, stage="Top-level unhandled exception", run_id=RUN_ID)
+            logger.critical("Unhandled exception — see logs/errors.log for details: %s", exc)
+            sys.exit(1)
     sys.exit(run())

@@ -13,15 +13,19 @@ from models import Story, StoryRejected, VerificationStatus  # noqa: E402
 from news.article_extractor import ArticleContent  # noqa: E402
 from pipeline.verifier import verify_story  # noqa: E402
 
+# ---------------------------------------------------------------------------
+# Fixtures — use non-fast-track domains so existing verification logic tests
+# are not affected by the fast-track enhancement.
+# ---------------------------------------------------------------------------
 
 def _story(
     title: str = "100 people killed after major city attack",
     summary: str = "Officials said 100 people were killed after an attack in the city.",
-    url: str = "https://reuters.com/story",
+    url: str = "https://wsj.com/story",
 ) -> Story:
     return Story(
         title=title,
-        source_name="Reuters",
+        source_name="Wall Street Journal",
         source_url=url,
         published_at=datetime.now(timezone.utc),
         raw_summary=summary,
@@ -31,8 +35,8 @@ def _story(
 
 
 def _source(
-    name: str = "BBC News",
-    url: str = "https://bbc.com/news/story",
+    name: str = "Washington Post",
+    url: str = "https://washingtonpost.com/news/story",
     title: str = "City attack leaves 100 people dead",
     summary: str = "Authorities confirmed that 100 people were killed in the city attack.",
     tier: int = 1,
@@ -67,7 +71,7 @@ class TestVerifyStory:
     def test_same_domain_does_not_count_as_independent(self):
         story = _story()
         story.corroborating_sources = [
-            _source(name="Reuters World", url="https://feeds.reuters.com/other-story")
+            _source(name="WSJ World", url="https://feeds.wsj.com/other-story")
         ]
 
         result = verify_story(story)
@@ -75,10 +79,10 @@ class TestVerifyStory:
         assert result.verification_status == VerificationStatus.UNVERIFIED
 
     def test_related_publisher_domains_do_not_count_twice(self):
-        story = _story(url="https://bbc.com/news/story")
-        story.source_name = "BBC News"
+        story = _story(url="https://nytimes.com/news/story")
+        story.source_name = "New York Times"
         story.corroborating_sources = [
-            _source(name="BBC News UK", url="https://bbc.co.uk/news/another-story")
+            _source(name="NYT World", url="https://nytimes.com/world/another-story")
         ]
         result = verify_story(story)
         assert result.verification_status == VerificationStatus.UNVERIFIED
