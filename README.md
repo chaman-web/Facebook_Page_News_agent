@@ -51,6 +51,23 @@ python agent.py --publish --dry-run
 python agent.py --publish
 ```
 
+### Generate a Reel locally
+
+Reel generation is a separate, manual workflow. It reads a queue entry, creates a silent
+9:16 MP4 and audit manifest under `reels_output/`, and never publishes or modifies the
+queue. It is not imported by the image-card or publishing pipelines.
+
+```bash
+# Generate from the latest queue entry (requires FFmpeg for MP4 output)
+python reel_generator.py
+
+# Render the four source frames without creating an MP4
+python reel_generator.py --frames-only
+
+# Select a specific zero-based queue entry
+python reel_generator.py --index 12
+```
+
 ---
 
 ## Reading a draft
