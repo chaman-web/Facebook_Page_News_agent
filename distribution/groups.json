@@ -1,0 +1,29 @@
+{
+  "groups": [
+    {
+      "group_id": "4030316150358436",
+      "group_name": "USA News Today",
+      "group_url": "https://www.facebook.com/groups/4030316150358436",
+      "countries": ["US"],
+      "regions": [],
+      "allowed_topics": ["breaking", "tech", "business", "politics", "science", "sports", "trending", "entertainment", "jobs", "world", "crime", "climate", "war", "wellness"],
+      "blocked_topics": [],
+      "active": true,
+      "approved": true,
+      "public_or_private": "PUBLIC",
+      "allow_news_posts": true,
+      "allow_links": true,
+      "allow_page_content": true,
+      "manual_approval_required": true,
+      "cooldown_minutes": 1440,
+      "daily_recommendation_limit": 1,
+      "rules_url": "https://www.facebook.com/groups/4030316150358436",
+      "rules_summary": "User reported the public group accepts open posting; admin review may apply.",
+      "rules_checked_at": "2026-09-30",
+      "approved_by": "workspace owner",
+      "approved_at": "2026-09-30",
+      "notes": "Manual submission only. Pending admin approval counts as submitted.",
+      "reported_member_count": 100000
+    }
+  ]
+}

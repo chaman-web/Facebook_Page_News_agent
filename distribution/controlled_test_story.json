@@ -1,0 +1,21 @@
+{
+  "story_id": "c457913c5e918ea64c0393c8",
+  "facebook_post_id": "1310756885451103_122114781885454244",
+  "facebook_post_url": "https://www.facebook.com/permalink.php?story_fbid=122114781885454244&id=61593627341706",
+  "facebook_publish_confirmed": true,
+  "headline": "Mexico's Baja California braces for Hurricane Polo as Hurricane Nolo threatens Hawaii",
+  "verified_claims": [
+    "Hurricane Polo threatened Baja California Sur in Mexico.",
+    "Hurricane Nolo created dangerous surf and rip-current conditions for Hawaii in the United States."
+  ],
+  "evidence": [{"source": "NPR", "url": "https://www.npr.org/2026/09/28/nx-s1-5983317/hurricane-polo-hurricane-nolo"}],
+  "category": "breaking",
+  "sources": ["NPR", "CBS News", "The Guardian"],
+  "publication_time": "2026-09-28T11:23:33.654272+00:00",
+  "event_time": "2026-09-28T00:00:00+00:00",
+  "verified_locations": ["Baja California Sur, Mexico", "Hawaii, United States"],
+  "verified_people": [],
+  "verified_organizations": ["National Hurricane Center"],
+  "verification_status": "VERIFIED",
+  "importance_score": 81.6
+}
